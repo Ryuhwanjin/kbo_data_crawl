@@ -34,24 +34,38 @@ def set_korean_font():
         plt.rcParams['font.family'] = 'AppleGothic'
     plt.rcParams['axes.unicode_minus'] = False
 
-def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
-    """지정한 투수의 투구 분포를 'Contour Only' 스타일로 시각화합니다."""
+def draw_savant_pitch_chart(csv_path, pitcher_name, year, out_dir):
+    """지정한 투수의 투구 분포를 연도별/구종 구사율과 함께 'Contour Only' 스타일로 시각화합니다."""
     if not os.path.exists(csv_path):
         print(f"❌ 데이터셋 파일이 존재하지 않습니다: {csv_path}")
         return
         
     df = pd.read_csv(csv_path)
     
+    # 날짜로부터 연도 파싱
+    df["year"] = pd.to_datetime(df["date"], errors="coerce").dt.year
+    
     # 1. 대상 투수 데이터 필터링
     p_df = df[(df["pitcher_name"] == pitcher_name) & (df["plate_x"].notnull()) & (df["plate_z"].notnull())].copy()
     
+    # 연도 필터링
+    if year is not None:
+        p_df = p_df[p_df["year"] == year]
+        year_label = f"{year}년"
+    else:
+        year_label = "전체 시즌"
+        
     if p_df.empty:
-        print(f"⚠️ {pitcher_name} 투수의 투구 데이터가 없습니다.")
-        available_pitchers = df["pitcher_name"].dropna().unique()
-        print(f"ℹ️ 시각화 가능한 투수 목록 (상위 10명): {', '.join(available_pitchers[:10])}")
+        print(f"⚠️ {pitcher_name} 투수의 {year_label} 투구 데이터가 없습니다.")
+        available_years = df[df["pitcher_name"] == pitcher_name]["year"].dropna().unique()
+        print(f"ℹ️ {pitcher_name} 투수 수집 완료 연도 목록: {', '.join(map(str, map(int, available_years)))}")
         return
         
-    print(f"🎯 {pitcher_name} 투수의 투구 {len(p_df)}구를 'Contour Only' 스타일로 분석합니다.")
+    total_pitches = len(p_df)
+    print("=" * 60)
+    print(f"📊 [{pitcher_name}] 투수의 {year_label} 구종 아스날 분석")
+    print(f"   총 투구 수: {total_pitches}구")
+    print("=" * 60)
     
     # 2. 스트라이크 존 박스 상하한선 평균 계산
     sz_top = p_df["sz_top"].mean() if p_df["sz_top"].notnull().any() else 3.4
@@ -71,7 +85,6 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     sz_width = plate_width_limit * 2
     sz_height = sz_top - sz_bottom
     
-    # zorder=2로 두어 배경으로 설정
     rect_sz = patches.Rectangle(
         (-plate_width_limit, sz_bottom), sz_width, sz_height,
         linewidth=2.5, edgecolor="#222222", facecolor="#F8F8F8", alpha=0.6, zorder=2
@@ -89,24 +102,54 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     home_plate = patches.Polygon(hp_pts, closed=True, facecolor="#E0E0E0", edgecolor="#666666", linewidth=1.5, zorder=1)
     ax.add_patch(home_plate)
     
-    # 6. 구종별 2D 등고선(KDE Contour) 오버랩 렌더링 (도트 제외)
+    # 6. 구종별 2D 등고선(KDE Contour) 오버랩 렌더링 및 비율 연산
     unique_pitches = p_df["pitch_type"].dropna().unique()
     legend_elements = []
+    
+    # 비율순 정렬을 위해 임시 저장
+    pitch_report_list = []
     
     for pitch_type in unique_pitches:
         sub_df = p_df[p_df["pitch_type"] == pitch_type]
         style = SAVANT_PITCH_MAP.get(pitch_type, DEFAULT_PITCH_STYLE)
         
-        # KDE는 표본 데이터 수가 극도로 적으면(예: 3개 이하) 계산 분산 에러가 납니다.
-        # 이를 방지하기 위해 구종당 최소 4구 이상 던졌을 경우에만 등고선 히트맵을 생성합니다.
-        if len(sub_df) >= 4:
+        count = len(sub_df)
+        usage_pct = (count / total_pitches) * 100
+        
+        pitch_report_list.append({
+            "type": pitch_type,
+            "count": count,
+            "pct": usage_pct,
+            "color": style["color"],
+            "cmap": style["cmap"],
+            "df": sub_df
+        })
+        
+    # 구사율 높은 순으로 정렬하여 콘솔 출력 및 범례 생성
+    pitch_report_list.sort(key=lambda x: x["count"], reverse=True)
+    
+    for item in pitch_report_list:
+        p_type = item["type"]
+        cnt = item["count"]
+        pct = item["pct"]
+        sub_df = item["df"]
+        
+        # 콘솔 리포트 출력
+        print(f"  - {p_type}: {cnt}구 ({pct:.1f}%)")
+        
+        # KDE는 표본 데이터 수가 극도로 적으면 계산 분산 에러가 나므로 최소 4구 이상 조건 적용
+        if cnt >= 4:
             sns.kdeplot(
                 x=sub_df["plate_x"], y=sub_df["plate_z"],
-                fill=True, alpha=0.25, levels=5, cmap=style["cmap"], thresh=0.15, zorder=3, ax=ax
+                fill=True, alpha=0.25, levels=5, cmap=item["cmap"], thresh=0.15, zorder=3, ax=ax
             )
-            # 범례 추가를 위해 색상 패치를 생성하여 리스트에 등록
-            legend_elements.append(patches.Patch(color=style["color"], label=f"{pitch_type} ({len(sub_df)}구)"))
-            
+        
+        # 범례 레이블에 구구/구사율을 포함하여 사반트 아스날 서식 완성
+        label_text = f"{p_type} ({cnt}구, {pct:.1f}%)"
+        legend_elements.append(patches.Patch(color=item["color"], label=label_text))
+        
+    print("=" * 60)
+    
     # 7. 축 범위 및 레이아웃 설정
     ax.set_xlim(-1.8, 1.8)
     ax.set_ylim(-0.5, 4.5)
@@ -117,7 +160,7 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     ax.set_yticks([])
     
     # 라벨 및 외곽 테두리선(Spines) 정리
-    ax.set_title(f"{pitcher_name} - Pitch Arsenal Heatmap\n(Contour Only / Catcher's View)", fontsize=16, fontweight="bold", pad=20, color="#222222")
+    ax.set_title(f"{pitcher_name} ({year_label}) - Pitch Arsenal Heatmap\n(Contour Only / Catcher's View)", fontsize=15, fontweight="bold", pad=20, color="#222222")
     
     for spine in ["top", "right", "left", "bottom"]:
         ax.spines[spine].set_color("#DDDDDD")
@@ -127,25 +170,27 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     if legend_elements:
         ax.legend(handles=legend_elements, loc="upper right", frameon=True, facecolor="#FFFFFF", edgecolor="#E0E0E0", shadow=True, fontsize=10)
     
-    # 8. 이미지 저장
+    # 8. 이미지 저장 (연도별 파일명 세분화 적용)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{pitcher_name}_pitch_chart.png")
+    suffix = f"_{year}" if year is not None else ""
+    out_path = os.path.join(out_dir, f"{pitcher_name}{suffix}_pitch_chart.png")
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close()
     
-    print(f"✅ Contour Only 스타일 피칭 분포 시각화 완료!")
+    print(f"✅ 시각화 완료! 차트 저장 경로:")
     print(f"   -> {os.path.abspath(out_path)}")
 
 def main():
-    parser = argparse.ArgumentParser(description="KBO PTS 투수 피칭 존 Contour Only 시각화 도구")
+    parser = argparse.ArgumentParser(description="KBO PTS 투수 피칭 존 연도/구사율 연계 시각화 도구")
     parser.add_argument("--pitcher", type=str, default="주현상", help="시각화할 투수 이름 (기본값: 주현상)")
+    parser.add_argument("--year", type=int, default=None, help="시각화할 연도 (기본값: None, 전체 연도)")
     args = parser.parse_args()
     
     csv_path = "./kbo_data/kbo_pitch_dataset.csv"
     out_dir = "./kbo_data"
     
-    draw_savant_pitch_chart(csv_path, args.pitcher, out_dir)
+    draw_savant_pitch_chart(csv_path, args.pitcher, args.year, out_dir)
 
 if __name__ == "__main__":
     main()
