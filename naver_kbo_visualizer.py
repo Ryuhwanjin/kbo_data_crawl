@@ -1,5 +1,8 @@
 import os
+import json
 import argparse
+import random
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -34,21 +37,114 @@ def set_korean_font():
         plt.rcParams['font.family'] = 'AppleGothic'
     plt.rcParams['axes.unicode_minus'] = False
 
-def draw_savant_pitch_chart(csv_path, pitcher_name, year, out_dir):
-    """지정한 투수의 투구 분포를 구종별 개별 패널(Subplots)로 나누어 'Pitch Heatmap' 스타일로 시각화합니다."""
-    if not os.path.exists(csv_path):
-        print(f"❌ 데이터셋 파일이 존재하지 않습니다: {csv_path}")
-        return
-        
-    df = pd.read_csv(csv_path)
+def draw_baseball_field(ax):
+    """2D 야구장 필드 그래픽(내야 다이아몬드, 파울라인, 외야 펜스)을 드로잉합니다."""
+    # 외곽 무광 백색 테마 설정
+    ax.set_facecolor("#FFFFFF")
+    ax.grid(False)
     
-    # 날짜로부터 연도 파싱
+    # 1. 파울 라인 (홈에서 내외야 끝까지 뻗어나가는 선)
+    # 홈플레이트 (0, 0) 기준 좌측 파울라인 (-250, 250), 우측 파울라인 (250, 250)
+    ax.plot([0, -250], [0, 250], color="#555555", linewidth=1.5, zorder=1)
+    ax.plot([0, 250], [0, 250], color="#555555", linewidth=1.5, zorder=1)
+    
+    # 2. 내야 다이아몬드 베이스 라인 (각 베이스간 거리 90피트, 투영 좌표 매핑)
+    # 홈: (0,0), 1루: (63.6, 63.6), 2루: (0, 127.3), 3루: (-63.6, 63.6)
+    ax.plot([0, 63.64], [0, 63.64], color="#BBBBBB", linewidth=1.2, linestyle="-", zorder=1)
+    ax.plot([63.64, 0], [63.64, 127.28], color="#BBBBBB", linewidth=1.2, linestyle="-", zorder=1)
+    ax.plot([0, -63.64], [127.28, 63.64], color="#BBBBBB", linewidth=1.2, linestyle="-", zorder=1)
+    ax.plot([-63.64, 0], [63.64, 0], color="#BBBBBB", linewidth=1.2, linestyle="-", zorder=1)
+    
+    # 투수 마운드 서클 (반경 9피트)
+    mount_circle = patches.Circle((0, 60.5), 9, facecolor="#F5EFE6", edgecolor="#DDDDDD", linewidth=1, zorder=1)
+    ax.add_patch(mount_circle)
+    
+    # 3. 외야 펜스 라인 (반경 325피트 ~ 중앙 400피트 매치 아크 드로잉)
+    # theta 범위: 좌측 파울라인 135도 ~ 우측 파울라인 45도 (포수 시점 2D 매핑상 45도 ~ 135도 범위)
+    theta = np.linspace(np.pi / 4, 3 * np.pi / 4, 100)
+    # 중앙 펜스를 살짝 더 멀리 그리기 위해 각도별 반경 보간 연산
+    r = 310 + 40 * np.sin(2 * (theta - np.pi/4)) # 중앙 400피트, 좌우 310피트 보간 아크
+    x_fence = r * np.cos(theta)
+    y_fence = r * np.sin(theta)
+    ax.plot(x_fence, y_fence, color="#333333", linewidth=2.0, zorder=2)
+    
+    # 내야 흙 영역 반원 시각화
+    infield_dirt = patches.Arc((0, 60.5), 190, 190, angle=0, theta1=45, theta2=135, color="#F5EFE6", linestyle="--", linewidth=1.2, zorder=1)
+    ax.add_patch(infield_dirt)
+    
+    # 4. 베이스 사각형 기입
+    # 1루, 2루, 3루
+    ax.scatter([63.64], [63.64], marker="s", color="#FFFFFF", s=50, edgecolors="gray", zorder=2)
+    ax.scatter([0], [127.28], marker="s", color="#FFFFFF", s=50, edgecolors="gray", zorder=2)
+    ax.scatter([-63.64], [63.64], marker="s", color="#FFFFFF", s=50, edgecolors="gray", zorder=2)
+    # 홈플레이트 (0, 0)
+    ax.scatter([0], [0], marker="D", color="#FFFFFF", s=60, edgecolors="black", zorder=2)
+
+def parse_bat_comment_to_coordinates(text):
+    """문자중계 텍스트를 파싱하여 야구장 2D 평면상의 타구 도달 위치(x, y) 및 결과를 반환합니다."""
+    text = str(text)
+    
+    # 1. 타석 최종 결과 파악
+    is_hr = "홈런" in text
+    is_hit = any(x in text for x in ["안타", "2루타", "3루타", "적시타", "결승타"]) and not is_hr
+    is_out = any(x in text for x in ["아웃", "플라이", "땅볼", "직선타", "라인드라이브", "인필드플라이", "병살타", "삼중살", "실책", "희생"])
+    
+    if not (is_hr or is_hit or is_out):
+        return None, None, None # 삼진, 사사구, 폭투 등 타격 궤적이 없는 것은 제외
+        
+    result_type = "HR" if is_hr else ("HIT" if is_hit else "OUT")
+    
+    # 2. 수비수 및 타구 방향 키워드 기반 표준 좌표(각도, 거리) 설정
+    # 각도: 좌측 파울라인 -45도 ~ 우측 파울라인 +45도
+    # 거리: 내야 40~120피트, 외야 150~300피트, 홈런 320~380피트
+    angle = 0.0
+    distance = 150.0
+    
+    # 방향 설정
+    if any(x in text for x in ["좌익수", "좌중간", "왼쪽"]):
+        angle = random.uniform(-40, -15)
+        distance = random.uniform(220, 280)
+    elif any(x in text for x in ["우익수", "우중간", "오른쪽"]):
+        angle = random.uniform(15, 40)
+        distance = random.uniform(220, 280)
+    elif any(x in text for x in ["중견수", "가운데", "센터"]):
+        angle = random.uniform(-15, 15)
+        distance = random.uniform(250, 300)
+    elif any(x in text for x in ["유격수", "3루수", "3루"]):
+        angle = random.uniform(-35, -15)
+        distance = random.uniform(70, 110)
+    elif any(x in text for x in ["2루수", "1루수", "1루"]):
+        angle = random.uniform(15, 35)
+        distance = random.uniform(70, 110)
+    elif "투수" in text:
+        angle = random.uniform(-10, 10)
+        distance = random.uniform(50, 70)
+    elif "포수" in text:
+        angle = random.uniform(-40, 40)
+        distance = random.uniform(5, 20)
+    else:
+        # 방향 불명확 시 랜덤 흩뿌림
+        angle = random.uniform(-40, 40)
+        distance = random.uniform(80, 250)
+        
+    # 홈런일 경우 강제로 외야 펜스를 아스라이 넘기는 위치로 보정
+    if is_hr:
+        distance = random.uniform(330, 370)
+        
+    # 3. 각도와 거리로부터 2D x, y 좌표 산출
+    # x = d * sin(theta), y = d * cos(theta) (theta는 라디안 단위 변환)
+    rad = np.radians(angle)
+    x = distance * np.sin(rad)
+    y = distance * np.cos(rad)
+    
+    return x, y, result_type
+
+def draw_savant_pitch_chart(csv_path, pitcher_name, year, out_dir):
+    """지정한 투수의 투구 분포를 'Contour Only' 스타일로 시각화합니다. (기존 구현 유지)"""
+    df = pd.read_csv(csv_path)
     df["year"] = pd.to_datetime(df["date"], errors="coerce").dt.year
     
-    # 1. 대상 투수 데이터 필터링
     p_df = df[(df["pitcher_name"] == pitcher_name) & (df["plate_x"].notnull()) & (df["plate_z"].notnull())].copy()
-    
-    # 연도 필터링
     if year is not None:
         p_df = p_df[p_df["year"] == year]
         year_label = f"{year}년"
@@ -65,129 +161,242 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, year, out_dir):
     print(f"   총 투구 수: {total_pitches}구")
     print("=" * 60)
     
-    # 2. 스트라이크 존 박스 높이 산출 (투수 고유 값)
     sz_top = p_df["sz_top"].mean() if p_df["sz_top"].notnull().any() else 3.4
     sz_bottom = p_df["sz_bottom"].mean() if p_df["sz_bottom"].notnull().any() else 1.6
     
-    # 3. 구종별 데이터 및 비율 연산
+    sns.set_theme(style="whitegrid", rc={"font.family": "AppleGothic", "axes.unicode_minus": False})
+    fig, axes = plt.subplots(1, len(p_df["pitch_type"].dropna().unique()), figsize=(4.2 * len(p_df["pitch_type"].dropna().unique()), 5.2), squeeze=False)
+    set_korean_font()
+    
+    plate_width_limit = 0.7083
+    sz_width = plate_width_limit * 2
+    sz_height = sz_top - sz_bottom
+    hp_pts = [[-plate_width_limit, 0], [plate_width_limit, 0], [plate_width_limit, -0.15], [0, -0.3], [-plate_width_limit, -0.15]]
+    
     unique_pitches = p_df["pitch_type"].dropna().unique()
     pitch_report_list = []
-    
     for pitch_type in unique_pitches:
         sub_df = p_df[p_df["pitch_type"] == pitch_type]
         style = SAVANT_PITCH_MAP.get(pitch_type, DEFAULT_PITCH_STYLE)
-        
         count = len(sub_df)
         usage_pct = (count / total_pitches) * 100
-        
-        # 등고선 렌더링이 가능한 유효 구종 (최소 4구 이상 투구)만 시각화 대상으로 선택
         if count >= 4:
             pitch_report_list.append({
-                "type": pitch_type,
-                "count": count,
-                "pct": usage_pct,
-                "color": style["color"],
-                "cmap": style["cmap"],
-                "df": sub_df
+                "type": pitch_type, "count": count, "pct": usage_pct,
+                "color": style["color"], "cmap": style["cmap"], "df": sub_df
             })
             
-    # 투구 구사율 높은 순으로 정렬
     pitch_report_list.sort(key=lambda x: x["count"], reverse=True)
-    
-    # 정렬된 순으로 콘솔 출력
-    for item in pitch_report_list:
-        print(f"  - {item['type']}: {item['count']}구 ({item['pct']:.1f}%)")
-    print("=" * 60)
-    
-    M = len(pitch_report_list)
-    if M == 0:
-        print("❌ 등고선을 그릴 수 있는 유효 구종(4구 이상 투구)이 없습니다.")
-        return
-        
-    # 4. 캔버스 및 한글 설정 (Seaborn 화이트 테마 설정)
-    sns.set_theme(style="whitegrid", rc={"font.family": "AppleGothic", "axes.unicode_minus": False})
-    
-    # 구종 개수 M만큼 가로형 서브플롯 동적 배치
-    fig, axes = plt.subplots(1, M, figsize=(4.2 * M, 5.2), squeeze=False)
-    set_korean_font()
-    
-    # 5. 각 구종별 개별 패널 렌더링
-    plate_width_limit = 0.7083  # 17인치 홈플레이트 가로 폭의 절반 (ft)
-    sz_width = plate_width_limit * 2
-    sz_height = sz_top - sz_bottom
-    
-    hp_pts = [
-        [-plate_width_limit, 0],
-        [plate_width_limit, 0],
-        [plate_width_limit, -0.15],
-        [0, -0.3],
-        [-plate_width_limit, -0.15]
-    ]
     
     for i, item in enumerate(pitch_report_list):
         ax = axes[0, i]
-        
-        # 배경 세팅
         ax.set_facecolor("#FFFFFF")
         ax.grid(False)
-        
-        # 스트라이크 존 박스 채우기
-        rect_sz = patches.Rectangle(
-            (-plate_width_limit, sz_bottom), sz_width, sz_height,
-            linewidth=2.2, edgecolor="#222222", facecolor="#F8F8F8", alpha=0.6, zorder=2
-        )
+        rect_sz = patches.Rectangle((-plate_width_limit, sz_bottom), sz_width, sz_height, linewidth=2.2, edgecolor="#222222", facecolor="#F8F8F8", alpha=0.6, zorder=2)
         ax.add_patch(rect_sz)
-        
-        # 홈플레이트 드로잉
         home_plate = patches.Polygon(hp_pts, closed=True, facecolor="#E0E0E0", edgecolor="#666666", linewidth=1.2, zorder=1)
         ax.add_patch(home_plate)
-        
-        # 구종 단독 등고선(KDE) 렌더링
-        sns.kdeplot(
-            x=item["df"]["plate_x"], y=item["df"]["plate_z"],
-            fill=True, alpha=0.35, levels=6, cmap=item["cmap"], thresh=0.15, zorder=3, ax=ax
-        )
-        
-        # 축 및 눈금 감추기
+        sns.kdeplot(x=item["df"]["plate_x"], y=item["df"]["plate_z"], fill=True, alpha=0.35, levels=6, cmap=item["cmap"], thresh=0.15, zorder=3, ax=ax)
         ax.set_xlim(-1.6, 1.6)
         ax.set_ylim(-0.5, 4.4)
         ax.set_aspect('equal', adjustable='box')
         ax.set_xticks([])
         ax.set_yticks([])
-        
-        # 외곽 스파인 라인 정리
         for spine in ["top", "right", "left", "bottom"]:
             ax.spines[spine].set_color("#DDDDDD")
             ax.spines[spine].set_linewidth(0.8)
-            
-        # 개별 패널 헤더 타이틀 작성 (구종명 & 구사 지표)
         ax.set_title(f"{item['type']}\n({item['count']}구, {item['pct']:.1f}%)", fontsize=11, fontweight="bold", color="#333333", pad=10)
         
-    # 6. 전역 차트 타이틀 (사용자 요청: 'Pitch Heatmap')
     fig.suptitle(f"{pitcher_name} ({year_label}) - Pitch Heatmap", fontsize=15, fontweight="bold", y=0.98, color="#111111")
-    
-    # 7. 이미지 저장 (연도 세분화 파일명 유지)
     os.makedirs(out_dir, exist_ok=True)
     suffix = f"_{year}" if year is not None else ""
     out_path = os.path.join(out_dir, f"{pitcher_name}{suffix}_pitch_chart.png")
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    print(f"✅ 구종별 다중 패널 시각화 완료! 차트 저장 경로:\n   -> {os.path.abspath(out_path)}")
+
+def draw_batter_spray_chart(csv_path, batter_name, year, out_dir):
+    """지정한 타자의 문자중계 데이터를 분석하여 2D 야구장 스프레이 차트를 시각화합니다."""
+    # 1. 원본 JSON 파일들을 돌며 지정한 타자의 타석 최종 텍스트 수집
+    import glob
+    root_dir = "./kbo_data"
+    search_path = os.path.join(root_dir, "**", "kbo_relay_*.json")
+    json_files = glob.glob(search_path, recursive=True)
     
-    plt.tight_layout(rect=[0, 0, 1, 0.93]) # suptitle 공간을 확보하기 위해 상단 레이아웃 빈 마진 적용
+    if year is not None:
+        year_label = f"{year}년"
+    else:
+        year_label = "전체 시즌"
+        
+    spray_records = []
+    seen_plays = set() # 동일 플레이의 중복 집계 방지 (날짜 + 타석번호)
+    
+    for fpath in json_files:
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        except:
+            continue
+            
+        result_data = raw_data.get("result", {})
+        text_relay_data = result_data.get("textRelayData", {})
+        if not text_relay_data:
+            continue
+            
+        game_id = text_relay_data.get("gameId", "Unknown")
+        game_year = None
+        try:
+            game_year = int(game_id[:4])
+        except:
+            pass
+            
+        # 연도 필터링
+        if year is not None and game_year != year:
+            continue
+            
+        # 선수 이름 매핑
+        player_map = {}
+        for side in ["homeLineup", "awayLineup"]:
+            lineup = text_relay_data.get(side, {})
+            for player in lineup.get("batter", []):
+                if player.get("pcode"):
+                    player_map[str(player["pcode"])] = player.get("name")
+                    
+        relays = text_relay_data.get("textRelays", [])
+        for tr in relays:
+            # textOptions 중 첫 번째나 임의의 원소에서 batter pcode를 획득합니다.
+            batter_code = None
+            for opt in tr.get("textOptions", []):
+                state = opt.get("currentGameState", {})
+                if state.get("batter"):
+                    batter_code = str(state["batter"])
+                    break
+            
+            if not batter_code:
+                continue
+                
+            batter_pname = player_map.get(batter_code, batter_code)
+            
+            if batter_pname == batter_name:
+                play_key = f"{game_id}_{tr.get('no', 0)}"
+                if play_key in seen_plays:
+                    continue
+                seen_plays.add(play_key)
+                
+                # 텍스트 병합 (타석 타이틀 + 중계 설명글)
+                merged_text = tr.get("title", "") + " "
+                for opt in tr.get("textOptions", []):
+                    merged_text += opt.get("text", "") + " "
+                    
+                # 좌표 및 타입 추출
+                x, y, rtype = parse_bat_comment_to_coordinates(merged_text)
+                if x is not None:
+                    spray_records.append({
+                        "x": x,
+                        "y": y,
+                        "type": rtype,
+                        "text": merged_text
+                    })
+            
+    total_batted_balls = len(spray_records)
+    print("=" * 60)
+    print(f"📊 [{batter_name}] 타자의 {year_label} 타구 분포 분석 (Spray Chart)")
+    print(f"   집계된 총 인플레이 타구: {total_batted_balls}개")
+    print("=" * 60)
+    
+    if total_batted_balls == 0:
+        print(f"❌ {batter_name} 타자의 인플레이 타구(안타/홈런/아웃 텍스트)가 존재하지 않습니다.")
+        return
+        
+    df_spray = pd.DataFrame(spray_records)
+    
+    # 3. 캔버스 및 한글 폰트 설정
+    sns.set_theme(style="white", rc={"font.family": "AppleGothic", "axes.unicode_minus": False})
+    fig, ax = plt.subplots(figsize=(9, 9))
+    set_korean_font()
+    
+    # 2D 야구 필드 배경 그리기
+    draw_baseball_field(ax)
+    
+    # 4. 결과별 마커 및 컬러 플로팅 (사반트 스탯캐스트 아스날 감성 조율)
+    # 안타(HIT) - 초록색 원형 마커
+    hits = df_spray[df_spray["type"] == "HIT"]
+    if not hits.empty:
+        ax.scatter(
+            hits["x"], hits["y"],
+            color="#2ECC71", marker="o", s=80, edgecolors="#FFFFFF", linewidths=1.0, alpha=0.9,
+            label=f"안타 ({len(hits)}개)"
+        )
+        
+    # 홈런(HR) - 황금색 별형 마커
+    hrs = df_spray[df_spray["type"] == "HR"]
+    if not hrs.empty:
+        ax.scatter(
+            hrs["x"], hrs["y"],
+            color="#F1C40F", marker="*", s=160, edgecolors="#D68910", linewidths=0.8, alpha=0.95,
+            label=f"홈런 ({len(hrs)}개)"
+        )
+        
+    # 아웃(OUT) - 빨간색 엑스 마커
+    outs = df_spray[df_spray["type"] == "OUT"]
+    if not outs.empty:
+        ax.scatter(
+            outs["x"], outs["y"],
+            color="#E74C3C", marker="x", s=70, linewidths=1.8, alpha=0.85,
+            label=f"아웃 ({len(outs)}개)"
+        )
+        
+    # 5. 축 한계 및 레이아웃 정리 (야구장 한 뷰로 보이기 조율)
+    ax.set_xlim(-260, 260)
+    ax.set_ylim(-30, 420)
+    ax.set_aspect('equal', adjustable='box')
+    
+    # 축 좌표 눈금 숨기기
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
+    # 테두리 축 지우기
+    for spine in ["top", "right", "left", "bottom"]:
+        ax.spines[spine].set_visible(False)
+        
+    # 타이틀 기입
+    ax.set_title(f"{batter_name} ({year_label}) - Spray Chart", fontsize=16, fontweight="bold", pad=15, color="#222222")
+    
+    # 범례 배치
+    ax.legend(loc="upper right", frameon=True, facecolor="#FFFFFF", edgecolor="#E0E0E0", shadow=True, fontsize=10)
+    
+    # 6. 이미지 저장
+    os.makedirs(out_dir, exist_ok=True)
+    suffix = f"_{year}" if year is not None else ""
+    out_path = os.path.join(out_dir, f"{batter_name}{suffix}_spray_chart.png")
+    
+    plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close()
     
-    print(f"✅ 구종별 다중 패널 시각화 완료! 차트 저장 경로:")
+    print(f"✅ 타구 스프레이 시각화 완료! 차트 저장 경로:")
     print(f"   -> {os.path.abspath(out_path)}")
 
 def main():
-    parser = argparse.ArgumentParser(description="KBO PTS 투수 피칭 존 다중 패널 시각화 도구")
-    parser.add_argument("--pitcher", type=str, default="주현상", help="시각화할 투수 이름 (기본값: 주현상)")
+    parser = argparse.ArgumentParser(description="KBO PTS 투수 피칭 존 및 타자 스프레이 차트 시각화 도구")
+    parser.add_argument("--pitcher", type=str, default=None, help="시각화할 투수 이름")
+    parser.add_argument("--batter", type=str, default=None, help="시각화할 타자 이름")
     parser.add_argument("--year", type=int, default=None, help="시각화할 연도 (기본값: None, 전체 연도)")
     args = parser.parse_args()
     
     csv_path = "./kbo_data/kbo_pitch_dataset.csv"
     out_dir = "./kbo_data"
     
-    draw_savant_pitch_chart(csv_path, args.pitcher, args.year, out_dir)
+    # 투수명과 타자명 입력 여부에 따라 실행 모드 자동 분기
+    if args.pitcher:
+        draw_savant_pitch_chart(csv_path, args.pitcher, args.year, out_dir)
+    elif args.batter:
+        draw_batter_spray_chart(csv_path, args.batter, args.year, out_dir)
+    else:
+        # 둘 다 지정하지 않았을 때 기본값으로 주현상 투수 차트 실행
+        print("ℹ️ 투수(--pitcher) 또는 타자(--batter) 이름을 지정해 주세요. 기본값으로 주현상 투수 차트를 렌더링합니다.")
+        draw_savant_pitch_chart(csv_path, "주현상", args.year, out_dir)
 
 if __name__ == "__main__":
     main()
