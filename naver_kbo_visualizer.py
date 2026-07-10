@@ -88,7 +88,7 @@ def parse_bat_comment_to_coordinates(text):
     is_hr = "홈런" in text
     is_triple = "3루타" in text
     is_double = "2루타" in text
-    is_single = any(x in text for x in ["안타", "적시타", "결승타"]) and not (is_hr or is_triple or is_double)
+    is_single = any(x in text for x in ["안타", "적시타", "결승타", "1루타"]) and not (is_hr or is_triple or is_double)
     
     if not (is_hr or is_triple or is_double or is_single):
         return None, None, None
