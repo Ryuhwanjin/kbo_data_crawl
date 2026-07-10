@@ -1,6 +1,6 @@
-# KBO PTS 야구 데이터 분석 엔진 (KBO PTS Baseball Analytics Engine)
+# KBO PTS 야구 데이터 수집기 (KBO PTS Baseball Data Crawler)
 
-KBO 리그의 경기별 상세 릴레이 및 3D PTS(Pitch Tracking System) 투구 추적 데이터를 자동으로 수집하여 로컬 데이터 레이크를 구축하고, 세이버메트릭스 지표와 투구 분석 시각화를 지원하는 파이썬 기반 데이터 분석 프레임워크입니다.
+네이버 스포츠 경기 상세 릴레이 및 3D PTS(Pitch Tracking System) 투구 추적 데이터를 자동으로 일괄 수집하여 로컬 데이터 레이크를 구축하는 KBO 전용 데이터 수집 툴킷입니다.
 
 ---
 
