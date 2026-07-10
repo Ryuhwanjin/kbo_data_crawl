@@ -84,55 +84,56 @@ def parse_bat_comment_to_coordinates(text):
     """문자중계 텍스트를 파싱하여 야구장 2D 평면상의 타구 도달 위치(x, y) 및 결과를 반환합니다."""
     text = str(text)
     
-    # 1. 타석 최종 결과 파악
+    # 1. 안타 유형 세분화 (아웃 및 기타 기록 제외)
     is_hr = "홈런" in text
-    is_hit = any(x in text for x in ["안타", "2루타", "3루타", "적시타", "결승타"]) and not is_hr
-    is_out = any(x in text for x in ["아웃", "플라이", "땅볼", "직선타", "라인드라이브", "인필드플라이", "병살타", "삼중살", "실책", "희생"])
+    is_triple = "3루타" in text
+    is_double = "2루타" in text
+    is_single = any(x in text for x in ["안타", "적시타", "결승타"]) and not (is_hr or is_triple or is_double)
     
-    if not (is_hr or is_hit or is_out):
-        return None, None, None # 삼진, 사사구, 폭투 등 타격 궤적이 없는 것은 제외
+    if not (is_hr or is_triple or is_double or is_single):
+        return None, None, None
         
-    result_type = "HR" if is_hr else ("HIT" if is_hit else "OUT")
+    if is_hr:
+        result_type = "HR"
+    elif is_triple:
+        result_type = "TRIPLE"
+    elif is_double:
+        result_type = "DOUBLE"
+    else:
+        result_type = "SINGLE"
     
-    # 2. 수비수 및 타구 방향 키워드 기반 표준 좌표(각도, 거리) 설정
-    # 각도: 좌측 파울라인 -45도 ~ 우측 파울라인 +45도
-    # 거리: 내야 40~120피트, 외야 150~300피트, 홈런 320~380피트
+    # 2. 수비수 및 타구 방향 키워드 기반 표준 각도 설정
     angle = 0.0
-    distance = 150.0
     
-    # 방향 설정
+    # 방향 설정 (각도만 유도)
     if any(x in text for x in ["좌익수", "좌중간", "왼쪽"]):
         angle = random.uniform(-40, -15)
-        distance = random.uniform(220, 280)
     elif any(x in text for x in ["우익수", "우중간", "오른쪽"]):
         angle = random.uniform(15, 40)
-        distance = random.uniform(220, 280)
     elif any(x in text for x in ["중견수", "가운데", "센터"]):
         angle = random.uniform(-15, 15)
-        distance = random.uniform(250, 300)
     elif any(x in text for x in ["유격수", "3루수", "3루"]):
         angle = random.uniform(-35, -15)
-        distance = random.uniform(70, 110)
     elif any(x in text for x in ["2루수", "1루수", "1루"]):
         angle = random.uniform(15, 35)
-        distance = random.uniform(70, 110)
     elif "투수" in text:
         angle = random.uniform(-10, 10)
-        distance = random.uniform(50, 70)
     elif "포수" in text:
         angle = random.uniform(-40, 40)
-        distance = random.uniform(5, 20)
     else:
-        # 방향 불명확 시 랜덤 흩뿌림
         angle = random.uniform(-40, 40)
-        distance = random.uniform(80, 250)
         
-    # 홈런일 경우 강제로 외야 펜스를 아스라이 넘기는 위치로 보정
-    if is_hr:
-        distance = random.uniform(330, 370)
+    # 구질별 사실적인 비행 거리 가중치 조정
+    if result_type == "SINGLE":
+        distance = random.uniform(140, 200)
+    elif result_type == "DOUBLE":
+        distance = random.uniform(220, 270)
+    elif result_type == "TRIPLE":
+        distance = random.uniform(240, 290)
+    elif result_type == "HR":
+        distance = random.uniform(330, 375)
         
     # 3. 각도와 거리로부터 2D x, y 좌표 산출
-    # x = d * sin(theta), y = d * cos(theta) (theta는 라디안 단위 변환)
     rad = np.radians(angle)
     x = distance * np.sin(rad)
     y = distance * np.cos(rad)
@@ -319,32 +320,41 @@ def draw_batter_spray_chart(csv_path, batter_name, year, out_dir):
     # 2D 야구 필드 배경 그리기
     draw_baseball_field(ax)
     
-    # 4. 결과별 마커 및 컬러 플로팅 (사반트 스탯캐스트 아스날 감성 조율)
-    # 안타(HIT) - 초록색 원형 마커
-    hits = df_spray[df_spray["type"] == "HIT"]
-    if not hits.empty:
+    # 4. 안타 유형별 마커 및 컬러 플로팅
+    # 단타 (SINGLE) - 초록색 원형 마커
+    singles = df_spray[df_spray["type"] == "SINGLE"]
+    if not singles.empty:
         ax.scatter(
-            hits["x"], hits["y"],
-            color="#2ECC71", marker="o", s=80, edgecolors="#FFFFFF", linewidths=1.0, alpha=0.9,
-            label=f"안타 ({len(hits)}개)"
+            singles["x"], singles["y"],
+            color="#2ECC71", marker="o", s=80, edgecolors="#FFFFFF", linewidths=0.8, alpha=0.9,
+            label=f"단타 ({len(singles)}개)"
         )
         
-    # 홈런(HR) - 황금색 별형 마커
+    # 2루타 (DOUBLE) - 파란색 사각형 마커
+    doubles = df_spray[df_spray["type"] == "DOUBLE"]
+    if not doubles.empty:
+        ax.scatter(
+            doubles["x"], doubles["y"],
+            color="#3498DB", marker="s", s=80, edgecolors="#FFFFFF", linewidths=0.8, alpha=0.9,
+            label=f"2루타 ({len(doubles)}개)"
+        )
+        
+    # 3루타 (TRIPLE) - 보라색 다이아몬드 마커
+    triples = df_spray[df_spray["type"] == "TRIPLE"]
+    if not triples.empty:
+        ax.scatter(
+            triples["x"], triples["y"],
+            color="#9B59B6", marker="D", s=90, edgecolors="#FFFFFF", linewidths=0.8, alpha=0.95,
+            label=f"3루타 ({len(triples)}개)"
+        )
+        
+    # 홈런 (HR) - 황금색 별 마커
     hrs = df_spray[df_spray["type"] == "HR"]
     if not hrs.empty:
         ax.scatter(
             hrs["x"], hrs["y"],
             color="#F1C40F", marker="*", s=160, edgecolors="#D68910", linewidths=0.8, alpha=0.95,
             label=f"홈런 ({len(hrs)}개)"
-        )
-        
-    # 아웃(OUT) - 빨간색 엑스 마커
-    outs = df_spray[df_spray["type"] == "OUT"]
-    if not outs.empty:
-        ax.scatter(
-            outs["x"], outs["y"],
-            color="#E74C3C", marker="x", s=70, linewidths=1.8, alpha=0.85,
-            label=f"아웃 ({len(outs)}개)"
         )
         
     # 5. 축 한계 및 레이아웃 정리 (야구장 한 뷰로 보이기 조율)
