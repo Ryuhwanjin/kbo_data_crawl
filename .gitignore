@@ -8,7 +8,8 @@ bin/
 include/
 
 # 대용량 raw 데이터셋 (GitHub 업로드 방지)
-kbo_data/
+kbo_data/*
+!kbo_data/*.csv
 
 # 파이썬 컴파일 파일
 __pycache__/
