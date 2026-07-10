@@ -106,12 +106,22 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     )
     ax.add_patch(rect_right_box)
     
-    # 타자의 Stance(좌타/우타) 비율을 감지해 텍스트 실루엣 표기
+    # 타자의 Stance(좌타/우타) 비율을 감지해 텍스트 및 실루엣 이미지 표기
     most_common_stance = p_df["stance"].mode()[0] if p_df["stance"].notnull().any() else "R"
+    assets_dir = "./kbo_data/assets"
+    
     if most_common_stance == "L":
-        ax.text(-plate_width_limit - 0.85, (sz_top + sz_bottom)/2, "좌타자\n(L)", color="#CCCCCC", fontsize=12, fontweight="bold", ha="center", va="center", zorder=1)
+        ax.text(plate_width_limit + 0.85, (sz_top + sz_bottom)/2, "좌타석\n(L-Batter)", color="#CCCCCC", fontsize=11, fontweight="bold", ha="center", va="center", zorder=1)
+        sil_path = os.path.join(assets_dir, "left_batter_silhouette.jpg")
+        if os.path.exists(sil_path):
+            img_left = plt.imread(sil_path)
+            ax.imshow(img_left, extent=[plate_width_limit + 0.1, plate_width_limit + 1.8, sz_bottom - 0.7, sz_top + 1.1], alpha=0.18, zorder=1)
     else:
-        ax.text(plate_width_limit + 0.85, (sz_top + sz_bottom)/2, "우타자\n(R)", color="#CCCCCC", fontsize=12, fontweight="bold", ha="center", va="center", zorder=1)
+        ax.text(-plate_width_limit - 0.85, (sz_top + sz_bottom)/2, "우타석\n(R-Batter)", color="#CCCCCC", fontsize=11, fontweight="bold", ha="center", va="center", zorder=1)
+        sil_path = os.path.join(assets_dir, "right_batter_silhouette.jpg")
+        if os.path.exists(sil_path):
+            img_right = plt.imread(sil_path)
+            ax.imshow(img_right, extent=[-plate_width_limit - 1.8, -plate_width_limit - 0.1, sz_bottom - 0.7, sz_top + 1.1], alpha=0.18, zorder=1)
         
     # 6. 홈플레이트 드로잉 (Savant 블랙 플랫 디자인)
     # 홈플레이트 좌표점 정의
@@ -124,6 +134,13 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     ]
     home_plate = patches.Polygon(hp_pts, closed=True, facecolor="#E0E0E0", edgecolor="#666666", linewidth=1.5, zorder=1)
     ax.add_patch(home_plate)
+    
+    # 6.5. 투구 밀집 등고선(KDE Contour) 렌더링
+    if len(p_df) >= 5:
+        sns.kdeplot(
+            x=p_df["plate_x"], y=p_df["plate_z"],
+            fill=True, alpha=0.15, levels=5, cmap="Reds", zorder=1, ax=ax
+        )
     
     # 7. 사반트 스타일 투구 마커 렌더링
     # 각 투구 위치에 고유 색상 원 + 정중앙 흰색 볼드체 영문 약어(FF, SL 등)
