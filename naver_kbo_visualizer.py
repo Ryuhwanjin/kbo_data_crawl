@@ -115,10 +115,12 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, out_dir):
     ax.set_ylim(-0.5, 4.5)
     ax.set_aspect('equal', adjustable='box')
     
+    # 축 눈금 좌표 및 라벨 제거 (초미니멀 Pitch Arsenal 스타일)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
     # 라벨 및 외곽 테두리선(Spines) 정리
     ax.set_title(f"{pitcher_name} - Statcast Pitch Arsenal\n(Catcher's View)", fontsize=16, fontweight="bold", pad=20, color="#222222")
-    ax.set_xlabel("Horizontal Plate Cross Location (ft)", fontsize=11, labelpad=8, color="#555555")
-    ax.set_ylabel("Vertical Plate Cross Location (ft)", fontsize=11, labelpad=8, color="#555555")
     
     # 테두리 축 정리 (사반트는 축 외곽 경계선을 거의 없앰)
     for spine in ["top", "right", "left", "bottom"]:
