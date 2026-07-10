@@ -1,59 +1,103 @@
-# KBO PTS 야구 데이터 수집 및 정제 파이프라인 (KBO PTS Baseball Data Pipeline)
+# ⚾️ KBO PTS Data Extraction & Analysis Suite
 
-네이버 스포츠 경기 상세 릴레이 및 3D PTS(Pitch Tracking System) 투구 추적 데이터를 일괄 수집(Collect)하고, 정제 및 결합(Transform)하여 투구 단위 및 선수별 시즌 요약 정형 데이터셋(Tabular Data)을 구축하는 KBO 전용 데이터 엔지니어링 파이프라인입니다.
-
----
-
-## 🏛️ 파이프라인 아키텍처 및 구성 파일
-
-본 프로젝트는 수집(Extract), 변환(Transform), 적재(Load)의 ETL 단계를 유기적으로 수행합니다.
-
-### 1. [naver_kbo_crawler.py](file:///Users/ryuhwanjin/Desktop/Project/인생/naver_kbo_crawler.py) (수집)
-- 2017~2025시즌 KBO 정규시즌 및 포스트시즌 경기 일정을 조회하여 릴레이 JSON 원본 데이터를 다운로드합니다. (시범경기 자동 배제)
-- 수집된 원본 파일은 `kbo_data/{year}/{month}/{day}/`와 같은 **일별 폴더 트리 구조**로 체계적으로 분류 적재됩니다.
-- 중복 파일 스킵 기능과 IP 차단 방지용 안전 대기 시간(`delay`)이 내장되어 있습니다.
-
-### 2. [naver_kbo_pipeline.py](file:///Users/ryuhwanjin/Desktop/Project/인생/naver_kbo_pipeline.py) (변환: 투구 단위 조인)
-- 적재된 일별 폴더 트리 내의 모든 JSON 파일을 스캔하여 문자중계 텍스트와 3D PTS 투구 궤적 좌표를 병합합니다.
-- 등가속도 운동 방정식을 이용해 홈플레이트를 통과하는 3차원 높이 변수 **`plate_z` (ft)**를 미적분 역학 공식을 통해 직접 계산하여 추가 적재합니다.
-- 최종 정제된 1구 단위 투구 데이터는 [kbo_pitch_dataset.csv](file:///Users/ryuhwanjin/Desktop/Project/인생/kbo_data/kbo_pitch_dataset.csv) 파일로 저장됩니다.
-
-### 3. [naver_kbo_summary.py](file:///Users/ryuhwanjin/Desktop/Project/인생/naver_kbo_summary.py) (변환: 선수별 요약 집계)
-- 모든 경기 라인업의 당일 최종 성적을 기반으로 선수별 누적 비율 지표를 집계합니다.
-- **타자**: 타석(`PA`), 타수(`AB`), 안타(`H`), 홈런(`HR`), 볼넷(`BB`), 사구(`HBP`), 삼진(`SO`)을 누계하고 타율(`AVG`), 출루율(`OBP`), 장타율(`SLG`), `OPS`를 자동으로 연산합니다.
-  - *과거 데이터 중 일부 타석(pa)이 누락되는 데이터 유실 오류를 `PA = max(PA, AB + BB + HBP)` 경계 공식으로 자동 클리닝합니다.*
-- **투수**: 실수형 이닝(`IP_float`), 자책점(`ER`), 피안타(`H`), 탈삼진(`SO`) 등을 집계하여 평균자책점(`ERA`)과 `WHIP`를 KBO 공식 기록법 규격에 맞게 계산합니다.
-- 결과는 [kbo_batter_summary.csv](file:///Users/ryuhwanjin/Desktop/Project/인생/kbo_data/kbo_batter_summary.csv) 및 [kbo_pitcher_summary.csv](file:///Users/ryuhwanjin/Desktop/Project/인생/kbo_data/kbo_pitcher_summary.csv) 파일로 내보내집니다.
+KBO 문자중계와 PTS(Pitch Tracking System) 3D 투구 좌표를 결합하여 데이터 수집(Extract), 이중 격리 정제(Transform/Load), 세이버메트릭스 누적 집계, 그리고 스탯캐스트(Statcast) 스타일 시각화 엔진을 아우르는 야구 분석 데이터 파이프라인 시스템입니다.
 
 ---
 
-## 🛠️ 설치 및 실행 방법
+## 🏛️ 주요 기능 및 아키텍처
 
-### 1. 개발 환경 설정
-본 프로젝트는 파이썬 가상환경 사용을 권장합니다.
-
-```bash
-# 가상환경 생성 및 활성화
-python3 -m venv venv
-source venv/bin/activate  # macOS/Linux
-
-# 필수 패키지(pandas, numpy, requests 등) 설치
-pip install -r requirements.txt
+```
+[네이버 KBO 라이브 API] 
+       │ (naver_kbo_crawler.py - 백그라운드 크롤러)
+       ▼
+[raw 경기 릴레이 JSON] 
+       │ (naver_kbo_pipeline.py - 이중 격리 ETL)
+       ├───► [정상 데이터셋] ──► kbo_pitch_dataset.csv (존 및 트래킹 분석)
+       └───► [이상치 격리]   ──► kbo_pitch_outliers.csv (사용자 검토용 파일)
+               │
+               ├───► [세이버메트릭스 요약 집계] (naver_kbo_summary.py)
+               │        └─► kbo_batter_summary.csv / kbo_pitcher_summary.csv
+               │
+               └───► [스탯캐스트 시각화 엔진] (naver_kbo_visualizer.py)
+                        ├─► 투수용: 구종별 다중 패널 Pitch Heatmap
+                        └─► 타자용: 안타 4분할 야구장 Spray Chart
 ```
 
-### 2. 실행 프로세스 (ETL 순서)
+---
 
-#### Step 1: Raw Data 수집 (Extract)
-```bash
-# 2017~2024시즌 전체 KBO 경기 데이터 일괄 수집
-python naver_kbo_crawler.py --years 2017,2018,2019,2020,2021,2022,2023,2024 --delay 1.5
-```
+## 🛠️ 1. 데이터 엔지니어링 & ETL 파이프라인
 
-#### Step 2: 투구 단위 및 선수별 정형 데이터 정제 (Transform & Load)
+### 1) KBO 데이터 수집기 (`naver_kbo_crawler.py`)
+* 연도 범위(`--years`) 및 출력 디렉토리(`--out`)를 파라미터로 지정하여, 네이버 스포츠 API-GW로부터 경기 일정 및 릴레이 JSON 데이터를 실시간으로 비동기 수집합니다.
+* 경기당 `1.2초 ~ 1.5초` 의 참조 지연(Rate-limiting 우회)을 설정하여 안전하게 백그라운드 태스크로 대량 다운로드를 수행합니다.
+
+### 2) 이중 격리 정제 파이프라인 (`naver_kbo_pipeline.py`)
+* 다운로드된 경기 JSON 데이터를 순회하며 PTS 3D 릴리스 포인트($x_0, y_0, z_0$), 가속도 파라미터, 홈플레이트 통과 2D 좌표 및 문자중계 텍스트를 결합하여 정형 데이터셋으로 변환합니다.
+* **이중 트랙 격리(Outliers Isolation) 적용**: 
+  * 경기 `gameId` 의 연도가 타당한 야구 정규시즌 범위(`2000년 ~ 2027년`)를 벗어나는 불량 및 테스트용 데이터(예: `3333`년, `7777`년)가 감지되면 완전히 Drop 시키지 않고 **`kbo_pitch_outliers.csv`**에 격리 보존합니다.
+  * 격리된 이상치 CSV 파일에 `raw_game_id_prefix` 필드를 추가 기입하여 사용자가 오기입 원인을 사후 추적하고 검토할 수 있도록 배려했습니다.
+  * 정상 범위의 투구 데이터는 **`kbo_pitch_dataset.csv`**에 안전하게 적재됩니다.
+
+### 3) 선수별 시즌 요약 통계 엔진 (`naver_kbo_summary.py`)
+* 정제된 데이터셋을 읽어와 타자별 시즌 비율 지표(AVG, OBP, SLG, OPS) 및 투수별 비율 지표(ERA, WHIP)를 연산하여 종합 스탯 CSV를 빌드합니다.
+* **데이터 무결성 예외 처리**:
+  * **야구 수학적 이닝 변환**: 소수점 이닝(예: `"1.1"` 또는 `"0.2"`)을 `정수이닝 + (아웃카운트 / 3.0)` 공식으로 실수형 이닝(`IP_float`)으로 변환하여 정밀한 평균자책점(ERA) 및 WHIP 분모 연산을 보장합니다.
+  * **OBP Division Overflow 보정**: 과거 일부 시즌의 결측 및 누락된 타석(`PA`) 값이 `None` 또는 `0`이 되어 비율이 비정상적으로 터지는 현상을 방지하기 위해 `PA = max(PA, AB + BB + HBP)` 수학적 보정식을 적용하였습니다.
+
+---
+
+## 🎨 2. 스탯캐스트 스타일 시각화 엔진 (`naver_kbo_visualizer.py`)
+
+### 1) 투수용: 구종별 다중 패널 `Pitch Heatmap`
+* **가로 분할 서브플롯 (Subplots)**: 하나의 캔버스에 구종이 겹쳐 뭉개지는 것을 방지하고자, 투수가 해당 시즌에 던진 유효 구종 개수만큼 가로형 멀티 격자를 분할하여 구종 단독 등고선을 렌더링합니다.
+* **초미니멀 프레임**: 복잡한 타자 실루엣, 좌우 배터 박스, 격자선, 그리고 스트라이크 존 9분할 격자를 전면 배제하고, 축 눈금 좌표(ticks) 및 라벨마저 숨겨 깨끗하고 모던한 시각적 효과를 극대화했습니다.
+* **구사율 범례 연동**: 범례 라벨에 `구종명 (투구수, 구사율%)` 서식을 다이내믹하게 연계 기입하여 투수의 시즌 구사 패턴을 한눈에 대조하도록 튜닝했습니다.
+* **안전 장치**: 표본 데이터 수가 너무 적어 커널 밀도(KDE) 연산 시 발생하는 수학적 분산 에러를 막기 위해, 구종별 최소 4구 이상 투구한 경우에만 등고선을 렌더링하도록 예외 처리했습니다.
+
+### 2) 타자용: 안타 4분할 야구장 `Spray Chart`
+* **아웃 소거 (HIT Only)**: 아웃된 타구를 제외하고 오직 성공적인 안타 계열 데이터만 매핑하여 타자의 성공 타구 분포와 장타력에만 집중하게 유도했습니다.
+* **4분할 마커 분기**:
+  * 단타 (SINGLE): 연한 초록색 원형 마커 `o` (`#2ECC71`, 비행거리 140~200ft)
+  * 2루타 (DOUBLE): 파란색 사각형 마커 `s` (`#3498DB`, 비행거리 220~270ft)
+  * 3루타 (TRIPLE): 보라색 다이아몬드 마커 `D` (`#9B59B6`, 비행거리 240~290ft)
+  * 홈런 (HR): 황금색 별형 마커 `*` (`#F1C40F`, 비행거리 330~375ft - 외야 펜스 밖)
+* **비행 거리 가중치 렌더링**: 장타 강도에 비례하도록 가상의 비행 거리에 난수 가중치를 결합하여 플롯함으로써, 단타는 얕은 내외야 경계에, 2루타/3루타는 펜스 앞에, 홈런은 펜스 바깥 영역에 입체적으로 흩뿌려지도록 구현했습니다.
+* **정밀 2D 필드 묘사**: 홈 베이스, 1/2/3루 스퀘어 패치, 투수 마운드 서클, 내야 흙 영역 경계 라인 및 중앙 펜스 400ft - 좌우 310ft 규격에 부합하는 부드러운 외야 펜스 아크(Arc)를 직접 드로잉 기입했습니다.
+
+---
+
+## 🚀 3. 사용 방법 (CLI Guide)
+
+프로젝트 폴더 내에서 가상환경 실행 후 아래 가이드라인을 참조하여 명령어를 수행합니다.
+
+### 1) 데이터 수집 및 정제
 ```bash
-# 1구 단위 투구 궤적 데이터셋(CSV) 생성
+# 1. 2017년부터 2025시즌까지 KBO 경기 JSON 데이터를 백그라운드로 수집 재가동
+python naver_kbo_crawler.py --years 2017,2018,2019,2020,2021,2022,2023,2024,2025 --out ./kbo_data --delay 1.2
+
+# 2. 수집된 JSON 파일들을 읽어와 정상 CSV 및 이상치 격리 CSV로 ETL 변환/동기화
 python naver_kbo_pipeline.py
 
-# 타자/투수 시즌 요약 데이터셋(CSV) 생성
+# 3. 선수별 누적 비율 지표 통계 요약 파일 생성
 python naver_kbo_summary.py
 ```
+
+### 2) 투수용 Pitch Heatmap 시각화
+```bash
+# 2024시즌 주현상 투수의 구종별 3분할 피칭 히트맵 차트 생성
+python naver_kbo_visualizer.py --pitcher 주현상 --year 2024
+
+# 전체 시즌 주현상 투수의 차트 생성 (연도 생략 시)
+python naver_kbo_visualizer.py --pitcher 주현상
+```
+* **결과 이미지 저장 경로**: `kbo_data/{투수명}_{연도}_pitch_chart.png`
+
+### 3) 타자용 Spray Chart 시각화
+```bash
+# 2017시즌 박건우 타자의 4분할 안타 스프레이 차트 생성
+python naver_kbo_visualizer.py --batter 박건우 --year 2017
+
+# 전체 시즌 신본기 타자의 차트 생성 (연도 생략 시)
+python naver_kbo_visualizer.py --batter 신본기
+```
+* **결과 이미지 저장 경로**: `kbo_data/{타자명}_{연도}_spray_chart.png`
