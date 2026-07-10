@@ -68,6 +68,16 @@ def process_single_game(json_path):
         return []
         
     game_id = text_relay_data.get("gameId")
+    if not game_id or len(game_id) < 4:
+        return []
+        
+    # 연도 유효성 검사 (3333, 7777 등 이상치 차단)
+    try:
+        year_val = int(game_id[:4])
+        if not (2000 <= year_val <= 2027):
+            return []
+    except Exception:
+        return []
     
     # 1. 라인업 기반 pcode -> 선수 이름 매핑 딕셔너리 빌드
     player_map = {}
