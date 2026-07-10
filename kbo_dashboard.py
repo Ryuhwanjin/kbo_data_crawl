@@ -92,7 +92,7 @@ if df_raw.empty:
     st.error("❌ KBO 데이터셋 파일이 존재하지 않거나 비어 있습니다. 파이프라인(`naver_kbo_pipeline.py`)을 먼저 구동해 주세요.")
     st.stop()
 
-# 4. 사이드바 - 투수 제어 패널 구성 (불필요한 모드 선택 라디오 버튼 전면 제거)
+# 4. 사이드바 - 투수 제어 패널 구성
 st.sidebar.markdown("### 🎛️ 투수 분석 제어 센터")
 out_dir = "./kbo_data"
 
@@ -148,7 +148,52 @@ with c5:
     
 st.markdown("<br>", unsafe_allow_html=True)
 
-# 6. 투수 시각화 차트 생성 및 임베딩
+# 6. 실시간 구종별 상세 태뷸러 데이터(Tabular Data) 생성 및 표출
+st.subheader("📋 구종별 상세 투구 통계 (Tabular Data)")
+
+# 투수별 데이터 필터링
+p_df_all = df_raw[df_raw["pitcher_name"] == selected_pitcher]
+if year_val is not None:
+    p_df_all = p_df_all[p_df_all["year"] == year_val]
+
+if not p_df_all.empty:
+    total_pitches = len(p_df_all)
+    summary_rows = []
+    
+    # 구종(pitch_type) 별로 그룹바이 연산
+    for pitch_type, group in p_df_all.groupby("pitch_type", dropna=False):
+        p_name = pitch_type if pd.notna(pitch_type) else "미분류"
+        count = len(group)
+        usage = (count / total_pitches) * 100
+        
+        # 구속 평균 및 최고값 연산
+        speeds = group["speed_kmh"].dropna()
+        avg_speed = speeds.mean() if not speeds.empty else None
+        max_speed = speeds.max() if not speeds.empty else None
+        
+        # 스트라이크 비율 연산 (S: 루킹/헛스윙, F: 파울, T: 타격파울 등 스트라이크 계열 분류)
+        strikes = group[group["pitch_result"].isin(["S", "F", "T", "K"])]
+        strike_pct = (len(strikes) / count) * 100 if count > 0 else 0.0
+        
+        summary_rows.append({
+            "구종": p_name,
+            "투구 수 (구)": count,
+            "구사율 (%)": round(usage, 1),
+            "평균 구속 (km/h)": round(avg_speed, 1) if avg_speed else "-",
+            "최고 구속 (km/h)": round(max_speed, 1) if max_speed else "-",
+            "스트라이크 비율 (%)": round(strike_pct, 1)
+        })
+        
+    df_pitch_summary = pd.DataFrame(summary_rows).sort_values(by="투구 수 (구)", ascending=False)
+    
+    # 테이블 인터랙티브 드로잉
+    st.dataframe(df_pitch_summary, use_container_width=True, hide_index=True)
+else:
+    st.info("ℹ️ 해당 조건의 상세 투구 데이터가 없습니다.")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# 7. 투수 시각화 차트 생성 및 임베딩
 st.subheader("🎯 구종별 3분할 Pitch Heatmap")
 
 # 시각화 함수 호출 (로컬에 이미지 렌더링 파일 저장)
