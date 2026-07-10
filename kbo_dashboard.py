@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import streamlit as st
-from naver_kbo_visualizer import draw_savant_pitch_chart
+from naver_kbo_visualizer import generate_pitch_chart_fig
 
 # 1. 페이지 레이아웃 및 테마 설정
 st.set_page_config(
@@ -196,15 +196,10 @@ st.markdown("<br>", unsafe_allow_html=True)
 # 7. 투수 시각화 차트 생성 및 임베딩
 st.subheader("🎯 구종별 3분할 Pitch Heatmap")
 
-# 시각화 함수 호출 (로컬에 이미지 렌더링 파일 저장)
 with st.spinner("구종별 피칭 분석 맵 렌더링 중..."):
-    draw_savant_pitch_chart(os.path.join(out_dir, "kbo_pitch_dataset.csv"), selected_pitcher, year_val, out_dir)
+    fig = generate_pitch_chart_fig(df_raw, selected_pitcher, year_val)
     
-# 저장된 파일명 연동 로드
-suffix = f"_{year_val}" if year_val is not None else ""
-chart_img_path = os.path.join(out_dir, f"{selected_pitcher}{suffix}_pitch_chart.png")
-
-if os.path.exists(chart_img_path):
-    st.image(chart_img_path, width="stretch")
+if fig is not None:
+    st.pyplot(fig)
 else:
     st.warning("⚠️ 시각화 차트를 생성하지 못했습니다. 투구 수(최소 4구 이상 조건)가 부족할 수 있습니다.")

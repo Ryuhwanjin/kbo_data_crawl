@@ -217,6 +217,74 @@ def draw_savant_pitch_chart(csv_path, pitcher_name, year, out_dir):
     plt.close()
     print(f"✅ 구종별 다중 패널 시각화 완료! 차트 저장 경로:\n   -> {os.path.abspath(out_path)}")
 
+def generate_pitch_chart_fig(df, pitcher_name, year):
+    """지정한 투수의 투구 분포를 메모리 기반 Matplotlib Figure 객체로 생성해 반환합니다. (Streamlit 최적화용)"""
+    p_df = df[(df["pitcher_name"] == pitcher_name) & (df["plate_x"].notnull()) & (df["plate_z"].notnull())].copy()
+    
+    if year is not None:
+        p_df = p_df[p_df["year"] == year]
+        year_label = f"{year}년"
+    else:
+        year_label = "전체 시즌"
+        
+    if p_df.empty:
+        return None
+        
+    total_pitches = len(p_df)
+    sz_top = p_df["sz_top"].mean() if p_df["sz_top"].notnull().any() else 3.4
+    sz_bottom = p_df["sz_bottom"].mean() if p_df["sz_bottom"].notnull().any() else 1.6
+    
+    sns.set_theme(style="whitegrid", rc={"font.family": "AppleGothic", "axes.unicode_minus": False})
+    
+    unique_pitches = p_df["pitch_type"].dropna().unique()
+    pitch_report_list = []
+    for pitch_type in unique_pitches:
+        sub_df = p_df[p_df["pitch_type"] == pitch_type]
+        style = SAVANT_PITCH_MAP.get(pitch_type, DEFAULT_PITCH_STYLE)
+        count = len(sub_df)
+        usage_pct = (count / total_pitches) * 100
+        if count >= 4:
+            pitch_report_list.append({
+                "type": pitch_type, "count": count, "pct": usage_pct,
+                "color": style["color"], "cmap": style["cmap"], "df": sub_df
+            })
+            
+    if not pitch_report_list:
+        return None
+        
+    pitch_report_list.sort(key=lambda x: x["count"], reverse=True)
+    
+    fig, axes = plt.subplots(1, len(pitch_report_list), figsize=(4.2 * len(pitch_report_list), 5.2), squeeze=False)
+    
+    plate_width_limit = 0.7083
+    sz_width = plate_width_limit * 2
+    sz_height = sz_top - sz_bottom
+    hp_pts = [[-plate_width_limit, 0], [plate_width_limit, 0], [plate_width_limit, -0.15], [0, -0.3], [-plate_width_limit, -0.15]]
+    
+    for i, item in enumerate(pitch_report_list):
+        ax = axes[0, i]
+        ax.set_facecolor("#FFFFFF")
+        ax.grid(False)
+        rect_sz = patches.Rectangle((-plate_width_limit, sz_bottom), sz_width, sz_height, linewidth=2.2, edgecolor="#222222", facecolor="#F8F8F8", alpha=0.6, zorder=2)
+        ax.add_patch(rect_sz)
+        home_plate = patches.Polygon(hp_pts, closed=True, facecolor="#E0E0E0", edgecolor="#666666", linewidth=1.2, zorder=1)
+        ax.add_patch(home_plate)
+        sns.kdeplot(x=item["df"]["plate_x"], y=item["df"]["plate_z"], fill=True, alpha=0.35, levels=6, cmap=item["cmap"], thresh=0.15, zorder=3, ax=ax)
+        
+        ax.set_xlim(-1.6, 1.6)
+        ax.set_ylim(-0.5, 4.4)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ["top", "right", "left", "bottom"]:
+            ax.spines[spine].set_color("#DDDDDD")
+            ax.spines[spine].set_linewidth(0.8)
+        ax.set_title(f"{item['type']}\n({item['count']}구, {item['pct']:.1f}%)", fontsize=11, fontweight="bold", color="#333333", pad=10)
+        
+    fig.suptitle(f"{pitcher_name} ({year_label}) - Pitch Heatmap", fontsize=15, fontweight="bold", y=0.98, color="#111111")
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    return fig
+
 def draw_batter_spray_chart(csv_path, batter_name, year, out_dir):
     """지정한 타자의 문자중계 데이터를 분석하여 2D 야구장 스프레이 차트를 시각화합니다."""
     # 1. 원본 JSON 파일들을 돌며 지정한 타자의 타석 최종 텍스트 수집
