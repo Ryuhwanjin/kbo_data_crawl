@@ -162,7 +162,7 @@ if mode == "투수 분석 (Pitch Heatmap)":
     chart_img_path = os.path.join(out_dir, f"{selected_pitcher}{suffix}_pitch_chart.png")
     
     if os.path.exists(chart_img_path):
-        st.image(chart_img_path, use_container_width=True)
+        st.image(chart_img_path, width="stretch")
     else:
         st.warning("⚠️ 시각화 차트를 생성하지 못했습니다. 투구 수(최소 4구 이상 조건)가 부족할 수 있습니다.")
 
@@ -220,6 +220,6 @@ else: # 타자 분석 모드
     chart_img_path = os.path.join(out_dir, f"{selected_batter}{suffix}_spray_chart.png")
     
     if os.path.exists(chart_img_path):
-        st.image(chart_img_path, use_container_width=True)
+        st.image(chart_img_path, width="stretch")
     else:
         st.warning("⚠️ 스프레이 차트를 생성하지 못했습니다. 수집된 인플레이 안타 데이터가 부족할 수 있습니다.")
