@@ -117,7 +117,7 @@ if mode == "투수 분석 (Pitch Heatmap)":
     st.subheader(f"📊 {selected_pitcher} 투수의 {selected_year_str} 세이버메트릭스 요약")
     
     # 요약 스탯 데이터 조회
-    p_stat = df_pit_sum[df_pit_sum["pitcher_name"] == selected_pitcher]
+    p_stat = df_pit_sum[df_pit_sum["player_name"] == selected_pitcher]
     
     c1, c2, c3, c4, c5 = st.columns(5)
     
@@ -183,7 +183,7 @@ else: # 타자 분석 모드
     # 5. 스탯 카드 레이아웃 (타자 지표 매핑)
     st.subheader(f"📊 {selected_batter} 타자의 {selected_year_str} 세이버메트릭스 요약")
     
-    b_stat = df_bat_sum[df_bat_sum["batter_name"] == selected_batter]
+    b_stat = df_bat_sum[df_bat_sum["player_name"] == selected_batter]
     
     c1, c2, c3, c4, c5 = st.columns(5)
     
