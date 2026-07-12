@@ -60,6 +60,17 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
             current_batter = "Unknown"
             
             for opt in text_options:
+                # [주자 아웃] 견제사, 도루실패 등 타석 결과와 무관하게 아웃카운트가 올라가는 주자 아웃 처리
+                if opt.get("type") == 14:
+                    raw_text = str(opt.get("text", ""))
+                    text = raw_text.replace(" ", "")
+                    p_name = opt.get("currentGameState", {}).get("pitcher", "Unknown")
+                    if p_name != "Unknown":
+                        if p_name not in pitchers:
+                            pitchers[p_name] = {'Outs': 0, 'H': 0, 'HR': 0, 'BB': 0, 'HBP': 0, 'SO': 0, 'PA': 0}
+                        if "견제사" in text or "도루실패" in text or "도루자" in text:
+                            pitchers[p_name]['Outs'] += 1
+
                 if opt.get("type") == 8 and opt.get("batterRecord"):
                     current_batter = opt["batterRecord"].get("name", current_batter)
                     
