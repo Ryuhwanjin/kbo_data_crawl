@@ -6,28 +6,52 @@ import pandas as pd
 def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
     """
     특정 연도의 JSON 데이터만 읽어 타자/투수의 세이버메트릭스 지표를 산출합니다.
-    (메모리 오버플로우 방지 및 빠른 테스트용)
     """
-    pattern = os.path.join(base_dir, str(year), "**", "kbo_relay_*.json")
-    files = glob.glob(pattern, recursive=True)
+    # [스킵 로직] 이미 파싱된 CSV가 존재하면 무거운 JSON 파싱 과정을 통째로 건너뜁니다! (시간 절약)
+    output_filename = f"kbo_batter_saber_{year}.csv"
+    if os.path.exists(output_filename):
+        print(f"⏩ [{year}] 이미 파싱 완료된 CSV({output_filename})가 존재하여 파싱 과정을 1초 만에 스킵합니다!")
+        return
+
+    target_dir = os.path.join(base_dir, str(year))
+    files = []
+    if os.path.exists(target_dir):
+        for root, _, filenames in os.walk(target_dir):
+            for fn in filenames:
+                if fn.endswith('.json'):
+                    files.append(os.path.join(root, fn))
     
     if not files:
-        print(f"[{year}] 데이터 파일을 찾을 수 없습니다. (경로: {pattern})")
+        print(f"[{year}] 데이터 파일을 찾을 수 없습니다. (경로: {target_dir})")
         return
         
     print(f"[{year}] {len(files)}개의 게임 데이터 세이버메트릭스 분석 시작...")
     
     batters = {}
     pitchers = {}
+    player_names = {}
     
-    for fpath in files:
+    for idx, fpath in enumerate(files):
+        if (idx + 1) % 50 == 0:
+            print(f"🔄 [{year}] 파일 파싱 진행 중: [{idx + 1}/{len(files)}] ({(idx+1)/len(files)*100:.1f}%)", flush=True)
+            
         with open(fpath, "r", encoding="utf-8") as f:
             try:
                 data = json.load(f)
             except:
                 continue
-            
-        relays = data.get("result", {}).get("textRelayData", {}).get("textRelays", [])
+        
+        # entry에서 이름 매핑 수집
+        text_relay_data = data.get("result", {}).get("textRelayData", {})
+        for entry_key in ["homeEntry", "awayEntry"]:
+            entry = text_relay_data.get(entry_key, {})
+            if entry:
+                for role in ["batter", "pitcher"]:
+                    for p in entry.get(role, []):
+                        if p.get("pcode") and p.get("name"):
+                            player_names[str(p["pcode"])] = p["name"]
+                            
+        relays = text_relay_data.get("textRelays", [])
         if not relays:
             continue
             
@@ -66,7 +90,7 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                     
                     is_ab = True
                     
-                    # 결과 텍스트 정교한 키워드 파싱 로직 (1번 항목)
+                    # 결과 텍스트 정교한 키워드 파싱 로직 (예외 케이스 완벽 방어)
                     if "홈런" in text:
                         batters[b_name]['HR'] += 1
                         pitchers[p_name]['H'] += 1
@@ -77,7 +101,7 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                     elif "2루타" in text:
                         batters[b_name]['2B'] += 1
                         pitchers[p_name]['H'] += 1
-                    elif "1루타" in text or "안타" in text or "내야안타" in text:
+                    elif ("1루타" in text or "안타" in text or "내야안타" in text) and "무안타" not in text and "실책" not in text:
                         batters[b_name]['1B'] += 1
                         pitchers[p_name]['H'] += 1
                     elif "볼넷" in text or "고의4구" in text:
@@ -88,21 +112,20 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                         batters[b_name]['HBP'] += 1
                         pitchers[p_name]['HBP'] += 1
                         is_ab = False
-                    elif "삼진" in text:
+                    elif "삼진" in text or "낫아웃" in text or "루킹" in text or "헛스윙" in text:
                         batters[b_name]['SO'] += 1
                         pitchers[p_name]['SO'] += 1
                         pitchers[p_name]['Outs'] += 1
-                        # 낫아웃 출루(스트라이크 낫 아웃)의 경우 아웃카운트가 안 올라가지만,
-                        # 과거 데이터에 "스트라이크 낫 아웃"이 있으므로 추가 체크
-                        if "출루" in text: 
+                        if "출루" in text or "폭투" in text or "포일" in text:
                             pitchers[p_name]['Outs'] -= 1 
                     elif "희생" in text:
                         is_ab = False
                         pitchers[p_name]['Outs'] += 1
+                    elif "방해" in text:
+                        is_ab = False
                     elif "병살" in text:
                         pitchers[p_name]['Outs'] += 2
                     elif "실책" in text or "야수선택" in text or "출루" in text:
-                        # 타수는 올라가고(아웃되지 않았지만 에러출루), 아웃카운트는 변동 없음
                         pass
                     elif "아웃" in text or "땅볼" in text or "뜬공" in text or "플라이" in text or "파울" in text:
                         pitchers[p_name]['Outs'] += 1
@@ -141,9 +164,9 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
             'SO': st['SO']
         })
         
-    # 투수 지표 가공 (FIP 등)
+    # 투수 지표 가공 (FIP 등 및 클래식 스탯)
     p_result = []
-    for name, st in pitchers.items():
+    for pcode, st in pitchers.items():
         ip = st['Outs'] / 3.0
         if ip < 3: continue # thresholds 임시 하향 조정 (디버깅용)
         
@@ -151,14 +174,22 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
         k9 = (st['SO'] * 9) / max(0.1, ip)
         bb9 = (st['BB'] * 9) / max(0.1, ip)
         
+        name = player_names.get(str(pcode), "Unknown")
         p_result.append({
             'Player': name,
+            'pcode': pcode,
             'IP': round(ip, 1),
+            'Outs': st['Outs'],
+            'H': st['H'],
+            'HR': st['HR'],
+            'BB': st['BB'],
+            'HBP': st['HBP'],
             'SO': st['SO'],
             'FIP': round(fip, 2),
             'K/9': round(k9, 2),
             'BB/9': round(bb9, 2)
         })
+        
         
     df_batters = pd.DataFrame(b_result)
     if not df_batters.empty:

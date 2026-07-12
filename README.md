@@ -89,9 +89,16 @@ python naver_kbo_summary.py
 
 ### 2) 파싱 데이터 정합성 전수 교차 검증 (Bulk Validation)
 ```bash
-# KBO 전 시즌(2017~2026)의 고유 ID 추출부터 파싱 및 네이버 모바일 기록실 1:1 대조까지 한 번에 실행
-source venv/bin/activate && python3 -u extract_unique_players.py && for year in {2017..2026}; do echo "=== [$year] ==="; python3 -u kbo_sabermetrics.py --year $year; python3 -u bulk_validator.py --year $year; done
+# KBO 전 시즌(2017~2026)의 파싱 및 네이버 모바일 기록실 1:1 대조 자동 검증 루프 (타자 & 투수)
+for year in {2017..2026}; do echo "=== [$year] ==="; python3 -u kbo_sabermetrics.py --year $year; python3 -u bulk_validator.py --year $year; done
 ```
+* **검증 대상 및 지표**:
+  - **타자**: 타수(AB), 안타(H), 2루타, 3루타, 홈런(HR), 볼넷(BB), 삼진(SO)
+  - **투수**: 이닝(IP - Outs 아웃카운트 환산 대조), 피안타(H), 피홈런(HR), 볼넷(BB), 사구(HBP), 탈삼진(SO)
+* **로그 파일 출력**:
+  - 타자 에러 리포트: `validation_errors_batter_{year}.log`
+  - 투수 에러 리포트: `validation_errors_pitcher_{year}.log`
+* **특이사항**: 은퇴 선수 또는 리그를 완전히 이탈한 과거 외국인 선수의 경우 네이버 인물 DB 검색 시 팝업이 발생하여 스킵될 수 있습니다. 해당 목록은 로그에 `[SKIP]`으로 기록되므로 수기 검증 대상 리스트로 활용 가능합니다.
 
 ### 3) 투수용 Pitch Heatmap 시각화
 ```bash
