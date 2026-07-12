@@ -112,6 +112,12 @@ def run_bulk_validator(year, player_type="batter"):
         except Exception as e:
             logger.error(f"[{player}] 브라우저 접속 에러: {e}")
             print(f"⚠️ {progress_str} [{player}] 브라우저 로딩 에러 건너뜀")
+            try:
+                driver.quit()
+            except:
+                pass
+            time.sleep(2)
+            driver = init_driver()
             continue
             
         try:
@@ -125,6 +131,12 @@ def run_bulk_validator(year, player_type="batter"):
                 alert_text = "알 수 없는 팝업"
             logger.info(f"[{player}] 네이버 팝업 발생: {alert_text}")
             print(f"⏩ {progress_str} [{player}] 네이버 미등록 선수로 스킵")
+            try:
+                driver.quit()
+            except:
+                pass
+            time.sleep(2)
+            driver = init_driver()
             continue
         
         target_tr = None
