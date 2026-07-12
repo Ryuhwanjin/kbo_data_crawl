@@ -59,6 +59,13 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
             text_options = relay.get("textOptions", [])
             current_batter = "Unknown"
             
+            # 해당 타석(relay)에 병살이 기록되었는지 확인 (이중 카운팅 방지)
+            has_double_play = False
+            for opt in text_options:
+                if "병살" in str(opt.get("text", "")):
+                    has_double_play = True
+                    break
+            
             for opt in text_options:
                 # [주자 아웃] 견제사, 도루실패 등 타석 결과와 무관하게 아웃카운트가 올라가는 주자 아웃 처리
                 if opt.get("type") == 14:
@@ -70,6 +77,9 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                             pitchers[p_name] = {'Outs': 0, 'H': 0, 'HR': 0, 'BB': 0, 'HBP': 0, 'SO': 0, 'PA': 0}
                         if "견제사" in text or "도루실패" in text or "도루자" in text:
                             pitchers[p_name]['Outs'] += 1
+                        elif ("태그아웃" in text or "주루사" in text or "포스아웃" in text or "아웃" in text) and not has_double_play:
+                            if "세이프" not in text and "진루" not in text:
+                                pitchers[p_name]['Outs'] += 1
 
                 if opt.get("type") == 8 and opt.get("batterRecord"):
                     current_batter = opt["batterRecord"].get("name", current_batter)
