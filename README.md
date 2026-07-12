@@ -44,6 +44,11 @@ KBO 문자중계와 PTS(Pitch Tracking System) 3D 투구 좌표를 결합하여 
   * **야구 수학적 이닝 변환**: 소수점 이닝(예: `"1.1"` 또는 `"0.2"`)을 `정수이닝 + (아웃카운트 / 3.0)` 공식으로 실수형 이닝(`IP_float`)으로 변환하여 정밀한 평균자책점(ERA) 및 WHIP 분모 연산을 보장합니다.
   * **OBP Division Overflow 보정**: 과거 일부 시즌의 결측 및 누락된 타석(`PA`) 값이 `None` 또는 `0`이 되어 비율이 비정상적으로 터지는 현상을 방지하기 위해 `PA = max(PA, AB + BB + HBP)` 수학적 보정식을 적용하였습니다.
 
+### 4) 데이터 정합성 대량 교차 검증 엔진 (`bulk_validator.py` & `extract_unique_players.py`)
+* KBO 텍스트 중계 JSON과 네이버 모바일 공식 기록실의 스탯을 1:1로 비교하여 오차율 0%를 보장하는 강력한 자동화 검증 스위트입니다.
+* **동명이인 방지 마스터 맵핑 (`extract_unique_players.py`)**: 전체 시즌 데이터를 스캔하여 고유 식별자(`pcode`)와 이름을 묶어 마스터 테이블(`unique_players.csv`)을 자동 추출합니다.
+* **토큰/메모리 락 방어 (Silent Execution)**: 네이버 모바일 웹을 가상 브라우저(Selenium)로 대량 스캔할 때 메모리 누수를 막기 위해 50명 단위로 드라이버를 재시작하며, 에러가 발생한 선수의 리포트는 터미널을 더럽히지 않고 `validation_errors_{year}.log`에 차곡차곡 보관합니다.
+
 ---
 
 ## 🎨 2. 스탯캐스트 스타일 시각화 엔진 (`naver_kbo_visualizer.py`)
@@ -82,7 +87,13 @@ python naver_kbo_pipeline.py
 python naver_kbo_summary.py
 ```
 
-### 2) 투수용 Pitch Heatmap 시각화
+### 2) 파싱 데이터 정합성 전수 교차 검증 (Bulk Validation)
+```bash
+# KBO 전 시즌(2017~2026)의 고유 ID 추출부터 파싱 및 네이버 모바일 기록실 1:1 대조까지 한 번에 실행
+source venv/bin/activate && python3 -u extract_unique_players.py && for year in {2017..2026}; do echo "=== [$year] ==="; python3 -u kbo_sabermetrics.py --year $year; python3 -u bulk_validator.py --year $year; done
+```
+
+### 3) 투수용 Pitch Heatmap 시각화
 ```bash
 # 2024시즌 주현상 투수의 구종별 3분할 피칭 히트맵 차트 생성
 python naver_kbo_visualizer.py --pitcher 주현상 --year 2024
