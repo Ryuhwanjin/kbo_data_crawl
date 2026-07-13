@@ -1,187 +1,160 @@
 # ⚾️ KBO PTS Data Extraction & Analysis Suite
 
-KBO 문자중계와 PTS(Pitch Tracking System) 3D 투구 좌표를 결합하여 데이터 수집(Extract), 이중 격리 정제(Transform/Load), 세이버메트릭스 누적 집계, 그리고 스탯캐스트(Statcast) 스타일 시각화 엔진을 아우르는 야구 분석 데이터 파이프라인 시스템입니다.
+KBO 문자중계와 PTS(Pitch Tracking System) 3D 투구 좌표를 결합하여 데이터 수집(Extract), 이중 격리 정제(Transform/Load), 세이버메트릭스 누적 집계, 스탯캐스트(Statcast) 스타일 시각화 엔진, 그리고 디스코드 봇 및 개인 아이디어 기획 메모장 비서를 아우르는 통합 야구 분석 데이터 파이프라인 시스템입니다.
 
 ---
 
-## 🏛️ 주요 기능 및 아키텍처
+## 🏛️ 프로젝트 폴더 구조 및 아키텍처
+
+프로젝트의 효율적인 유지보수와 구조화를 위해 파이썬 파일들이 기능별 서브디렉토리로 깔끔하게 정리되어 있습니다.
 
 ```
-[네이버 KBO 라이브 API] 
-       │ (naver_kbo_crawler.py - 백그라운드 크롤러)
-       ▼
-[raw 경기 릴레이 JSON] 
-       │ (naver_kbo_pipeline.py - 이중 격리 ETL)
-       ├───► [정상 데이터셋] ──► kbo_pitch_dataset.csv (존 및 트래킹 분석)
-       └───► [이상치 격리]   ──► kbo_pitch_outliers.csv (사용자 검토용 파일)
-               │
-               ├───► [세이버메트릭스 요약 집계] (naver_kbo_summary.py)
-               │        └─► kbo_batter_summary.csv / kbo_pitcher_summary.csv
-               │
-               └───► [스탯캐스트 시각화 엔진] (naver_kbo_visualizer.py)
-                        ├─► 투수용: 구종별 다중 패널 Pitch Heatmap
-                        └─► 타자용: 안타 4분할 야구장 Spray Chart
+/Users/ryuhwanjin/Desktop/Project/인생/
+├── bots/                  # 디스코드 및 소셜 봇 관련 핵심 실행 파일
+│   ├── kbo_discord_bot.py
+│   └── kbo_social_bot.py
+├── crawlers/              # 네이버 KBO 크롤러 및 뉴스 스크래퍼
+│   ├── kbo_news_scraper.py
+│   ├── naver_kbo_crawler.py
+│   ├── naver_kbo_pipeline.py
+│   └── naver_kbo_summary.py
+├── analytics/             # 세이버메트릭스 데이터 분석 및 WAR 연산
+│   ├── kbo_sabermetrics.py
+│   ├── kbo_war_engine.py
+│   └── extract_unique_players.py
+├── simulation/            # 경기 시뮬레이터
+│   └── kbo_match_simulator.py
+├── visualization/         # 대시보드, 차트, 카드 이미지 렌더러
+│   ├── kbo_card_generator.py
+│   ├── kbo_chart_generator.py
+│   ├── kbo_dashboard.py
+│   └── naver_kbo_visualizer.py
+├── utils/                 # 스케줄 관리자, 유효성 검사기, 아이디어 메모
+│   ├── bulk_validator.py
+│   ├── daily_kbo_updater.py
+│   ├── fast_local_validator.py
+│   └── kbo_idea_memo.py
+├── kbo_data/              # 수집된 KBO 경기 데이터 (일자별 JSON)
+├── kbo_test_data/         # 테스트용 샘플 데이터
+├── saber_data/            # 세이버메트릭스 누적 데이터 및 JSON 보정치 캐시
+├── logs/                  # 봇 및 스케줄러 실행 로그
+├── tests/                 # 단위 테스트 코드
+└── ideas.md               # 아이디어 메모장 (마크다운 컴파일 결과물)
 ```
 
 ---
 
 ## 🛠️ 1. 데이터 엔지니어링 & ETL 파이프라인
 
-### 1) KBO 데이터 수집기 (`naver_kbo_crawler.py`)
+### 1) KBO 데이터 수집기 (`crawlers/naver_kbo_crawler.py`)
 * 연도 범위(`--years`) 및 출력 디렉토리(`--out`)를 파라미터로 지정하여, 네이버 스포츠 API-GW로부터 경기 일정 및 릴레이 JSON 데이터를 실시간으로 비동기 수집합니다.
 * 경기당 `1.2초 ~ 1.5초` 의 참조 지연(Rate-limiting 우회)을 설정하여 안전하게 백그라운드 태스크로 대량 다운로드를 수행합니다.
 
-### 2) 이중 격리 정제 파이프라인 (`naver_kbo_pipeline.py`)
+### 2) 이중 격리 정제 파이프라인 (`crawlers/naver_kbo_pipeline.py`)
 * 다운로드된 경기 JSON 데이터를 순회하며 PTS 3D 릴리스 포인트($x_0, y_0, z_0$), 가속도 파라미터, 홈플레이트 통과 2D 좌표 및 문자중계 텍스트를 결합하여 정형 데이터셋으로 변환합니다.
 * **이중 트랙 격리(Outliers Isolation) 적용**: 
-  * 경기 `gameId` 의 연도가 타당한 야구 정규시즌 범위(`2000년 ~ 2027년`)를 벗어나는 불량 및 테스트용 데이터(예: `3333`년, `7777`년)가 감지되면 완전히 Drop 시키지 않고 **`kbo_pitch_outliers.csv`**에 격리 보존합니다.
-  * 격리된 이상치 CSV 파일에 `raw_game_id_prefix` 필드를 추가 기입하여 사용자가 오기입 원인을 사후 추적하고 검토할 수 있도록 배려했습니다.
-  * 정상 범위의 투구 데이터는 **`kbo_pitch_dataset.csv`**에 안전하게 적재됩니다.
+  * 경기 `gameId` 의 연도가 타당한 야구 정규시즌 범위(`2000년 ~ 2027년`)를 벗어나는 불량 및 테스트용 데이터(예: `3333`년, `7777`년)가 감지되면 완전히 Drop 시키지 않고 **`saber_data/kbo_pitch_outliers.csv`**에 격리 보존합니다.
 
-### 3) 선수별 시즌 요약 통계 엔진 (`naver_kbo_summary.py`)
+### 3) 선수별 시즌 요약 통계 엔진 (`crawlers/naver_kbo_summary.py`)
 * 정제된 데이터셋을 읽어와 타자별 시즌 비율 지표(AVG, OBP, SLG, OPS) 및 투수별 비율 지표(ERA, WHIP)를 연산하여 종합 스탯 CSV를 빌드합니다.
 * **데이터 무결성 예외 처리**:
   * **야구 수학적 이닝 변환**: 소수점 이닝(예: `"1.1"` 또는 `"0.2"`)을 `정수이닝 + (아웃카운트 / 3.0)` 공식으로 실수형 이닝(`IP_float`)으로 변환하여 정밀한 평균자책점(ERA) 및 WHIP 분모 연산을 보장합니다.
-  * **OBP Division Overflow 보정**: 과거 일부 시즌의 결측 및 누락된 타석(`PA`) 값이 `None` 또는 `0`이 되어 비율이 비정상적으로 터지는 현상을 방지하기 위해 `PA = max(PA, AB + BB + HBP)` 수학적 보정식을 적용하였습니다.
+  * **OBP Division Overflow 보정**: `PA = max(PA, AB + BB + HBP)` 수학적 보정식을 적용하여 OBP 오버플로우를 방지합니다.
 
-### 4) 데이터 정합성 대량 교차 검증 엔진 (`bulk_validator.py` & `extract_unique_players.py`)
+### 4) 데이터 정합성 대량 교차 검증 엔진 (`utils/bulk_validator.py` & `analytics/extract_unique_players.py`)
 * KBO 텍스트 중계 JSON과 네이버 모바일 공식 기록실의 스탯을 1:1로 비교하여 오차율 0%를 보장하는 강력한 자동화 검증 스위트입니다.
-* **동명이인 방지 마스터 맵핑 (`extract_unique_players.py`)**: 전체 시즌 데이터를 스캔하여 고유 식별자(`pcode`)와 이름을 묶어 마스터 테이블(`unique_players.csv`)을 자동 추출합니다.
-* **토큰/메모리 락 방어 (Silent Execution)**: 네이버 모바일 웹을 가상 브라우저(Selenium)로 대량 스캔할 때 메모리 누수를 막기 위해 50명 단위로 드라이버를 재시작하며, 에러가 발생한 선수의 리포트는 터미널을 더럽히지 않고 `validation_errors_{year}.log`에 차곡차곡 보관합니다.
 
 ---
 
-## 🎨 2. 스탯캐스트 스타일 시각화 엔진 (`naver_kbo_visualizer.py`)
+## 🎨 2. 스탯캐스트 스타일 시각화 엔진 (`visualization/naver_kbo_visualizer.py`)
 
-### 1) 투수용: 구종별 다중 패널 `Pitch Heatmap`
-* **가로 분할 서브플롯 (Subplots)**: 하나의 캔버스에 구종이 겹쳐 뭉개지는 것을 방지하고자, 투수가 해당 시즌에 던진 유효 구종 개수만큼 가로형 멀티 격자를 분할하여 구종 단독 등고선을 렌더링합니다.
-* **초미니멀 프레임**: 복잡한 타자 실루엣, 좌우 배터 박스, 격자선, 그리고 스트라이크 존 9분할 격자를 전면 배제하고, 축 눈금 좌표(ticks) 및 라벨마저 숨겨 깨끗하고 모던한 시각적 효과를 극대화했습니다.
-* **구사율 범례 연동**: 범례 라벨에 `구종명 (투구수, 구사율%)` 서식을 다이내믹하게 연계 기입하여 투수의 시즌 구사 패턴을 한눈에 대조하도록 튜닝했습니다.
-* **안전 장치**: 표본 데이터 수가 너무 적어 커널 밀도(KDE) 연산 시 발생하는 수학적 분산 에러를 막기 위해, 구종별 최소 4구 이상 투구한 경우에만 등고선을 렌더링하도록 예외 처리했습니다.
+### 1) 투수용: 구종별 피칭 맵 (`Pitch Heatmap`)
+* 가로 분할 서브플롯(Subplots)을 통해 투수가 던진 유효 구종별 투구 밀도를 등고선으로 렌더링합니다.
+* 라벨과 축을 숨긴 초미니멀 프레임을 채택하여 시각적 효과를 높였으며 최소 4구 이상 투구한 구종만 표기되도록 예외 처리가 내장되어 있습니다.
 
 ### 2) 타자용: 안타 4분할 야구장 `Spray Chart`
-* **아웃 소거 (HIT Only)**: 아웃된 타구를 제외하고 오직 성공적인 안타 계열 데이터만 매핑하여 타자의 성공 타구 분포와 장타력에만 집중하게 유도했습니다.
-* **4분할 마커 분기**:
-  * 단타 (SINGLE): 연한 초록색 원형 마커 `o` (`#2ECC71`, 비행거리 140~200ft)
-  * 2루타 (DOUBLE): 파란색 사각형 마커 `s` (`#3498DB`, 비행거리 220~270ft)
-  * 3루타 (TRIPLE): 보라색 다이아몬드 마커 `D` (`#9B59B6`, 비행거리 240~290ft)
-  * 홈런 (HR): 황금색 별형 마커 `*` (`#F1C40F`, 비행거리 330~375ft - 외야 펜스 밖)
-* **비행 거리 가중치 렌더링**: 장타 강도에 비례하도록 가상의 비행 거리에 난수 가중치를 결합하여 플롯함으로써, 단타는 얕은 내외야 경계에, 2루타/3루타는 펜스 앞에, 홈런은 펜스 바깥 영역에 입체적으로 흩뿌려지도록 구현했습니다.
-* **정밀 2D 필드 묘사**: 홈 베이스, 1/2/3루 스퀘어 패치, 투수 마운드 서클, 내야 흙 영역 경계 라인 및 중앙 펜스 400ft - 좌우 310ft 규격에 부합하는 부드러운 외야 펜스 아크(Arc)를 직접 드로잉 기입했습니다.
+* 안타 계열 데이터만 매핑하며 단타(SINGLE), 2루타(DOUBLE), 3루타(TRIPLE), 홈런(HR) 각각을 고유한 색상 및 마커로 다르게 분기 표기합니다.
+* 가상의 비행거리 가중치를 이용해 외야 필드 및 펜스 바깥 영역에 사실적으로 안타가 배치되도록 구현했습니다.
 
 ---
 
 ## 🚀 3. 사용 방법 (CLI Guide)
 
-프로젝트 폴더 내에서 가상환경 실행 후 아래 가이드라인을 참조하여 명령어를 수행합니다.
+모든 파이썬 파일들이 서브디렉토리로 정리되었으므로, 실행 시 적절한 폴더 경로를 명시해야 합니다.
 
 ### 1) 데이터 수집 및 정제
 ```bash
-# 1. 2017년부터 2025시즌까지 KBO 경기 JSON 데이터를 백그라운드로 수집 재가동
-python naver_kbo_crawler.py --years 2017,2018,2019,2020,2021,2022,2023,2024,2025 --out ./kbo_data --delay 1.2
+# 1. 2017년부터 2025시즌까지 KBO 경기 JSON 데이터를 백그라운드로 수집
+python crawlers/naver_kbo_crawler.py --years 2017,2018,2019,2020,2021,2022,2023,2024,2025 --out ./kbo_data --delay 1.2
 
-# 2. 수집된 JSON 파일들을 읽어와 정상 CSV 및 이상치 격리 CSV로 ETL 변환/동기화
-python naver_kbo_pipeline.py
+# 2. 수집된 JSON 파일들을 읽어와 정상 CSV 및 이상치 격리 CSV로 ETL 변환
+python crawlers/naver_kbo_pipeline.py
 
 # 3. 선수별 누적 비율 지표 통계 요약 파일 생성
-python naver_kbo_summary.py
+python crawlers/naver_kbo_summary.py
 ```
 
 ### 2) 파싱 데이터 정합성 전수 교차 검증 (Bulk Validation)
 ```bash
-# KBO 전 시즌(2017~2026)의 파싱 및 네이버 모바일 기록실 1:1 대조 자동 검증 루프 (타자 & 투수)
-for year in {2017..2026}; do echo "=== [$year] ==="; python3 -u kbo_sabermetrics.py --year $year; python3 -u bulk_validator.py --year $year; done
+# KBO 전 시즌(2017~2026)의 파싱 및 네이버 모바일 기록실 1:1 대조 자동 검증 루프
+for year in {2017..2026}; do echo "=== [$year] ==="; python3 analytics/kbo_sabermetrics.py --year $year; python3 utils/bulk_validator.py --year $year; done
 ```
-* **검증 대상 및 지표**:
-  - **타자**: 타수(AB), 안타(H), 2루타, 3루타, 홈런(HR), 볼넷(BB), 삼진(SO)
-  - **투수**: 이닝(IP - Outs 아웃카운트 환산 대조. *견제사, 도루실패/도루자 등 타석 외 아웃카운트(Type 14) 자동 보정 포함*), 피안타(H), 피홈런(HR), 볼넷(BB), 사구(HBP), 탈삼진(SO)
-* **로그 파일 출력**:
-  - 타자 에러 리포트: `validation_errors_batter_{year}.log`
-  - 투수 에러 리포트: `validation_errors_pitcher_{year}.log`
-* **특이사항**:
-  - 은퇴 선수 또는 리그를 완전히 이탈한 과거 외국인 선수의 경우 네이버 인물 DB 검색 시 팝업이 발생하여 스킵될 수 있습니다. 해당 목록은 로그에 `[SKIP]`으로 기록되므로 수기 검증 대상 리스트로 활용 가능합니다.
-  - 이닝 검증은 네이버의 분수 이닝 표기법(예: `1 1/3`, `2/3`)과 소수점 표기법을 모두 아웃카운트 단위로 변환하여 1:1 정밀 대조합니다.
 
 ### 3) 투수용 Pitch Heatmap 시각화
 ```bash
-# 2024시즌 주현상 투수의 구종별 3분할 피칭 히트맵 차트 생성
-python naver_kbo_visualizer.py --pitcher 주현상 --year 2024
-
-# 전체 시즌 주현상 투수의 차트 생성 (연도 생략 시)
-python naver_kbo_visualizer.py --pitcher 주현상
+# 2024시즌 주현상 투수의 구종별 히트맵 차트 생성
+python visualization/naver_kbo_visualizer.py --pitcher 주현상 --year 2024
 ```
 * **결과 이미지 저장 경로**: `kbo_data/{투수명}_{연도}_pitch_chart.png`
 
-### 3) 타자용 Spray Chart 시각화
+### 4) 타자용 Spray Chart 시각화
 ```bash
-# 2017시즌 박건우 타자의 4분할 안타 스프레이 차트 생성
-python naver_kbo_visualizer.py --batter 박건우 --year 2017
-
-# 전체 시즌 신본기 타자의 차트 생성 (연도 생략 시)
-python naver_kbo_visualizer.py --batter 신본기
+# 2017시즌 박건우 타자의 안타 스프레이 차트 생성
+python visualization/naver_kbo_visualizer.py --batter 박건우 --year 2017
 ```
 * **결과 이미지 저장 경로**: `kbo_data/{타자명}_{연도}_spray_chart.png`
 
 ---
 
-## 🛠️ 4. 2017~2025 데이터 정합성(오차 0) 이슈 해결 리포트
+## 🤖 4. 디스코드 봇 및 스케줄러 & 아이디어 메모장 (`bots/kbo_discord_bot.py`)
 
-네이버 KBO 원천 데이터 자체의 오기 및 누락으로 인해 공식 기록실 스탯과 발생했던 격차를 수학적으로 완전 무결하게 정합(오차 0)시킨 과정에 대한 상세 리포트입니다.
+KBO 뉴스 큐레이션, 실시간 크롤링, 음악 재생 기능과 더불어 **개인용 비공개 아이디어 메모장** 기능이 탑재되어 있습니다.
 
-### 1) 주요 이슈 및 디버깅 결과
-1. **타자 동명이인 및 개명/트레이드 누락**:
-   - 기존의 이름(`Player`) 기반 스탯 누적 방식으로 인해, 시즌 도중 트레이드되거나 개명한 선수(예: 오승택 ➡️ 오태곤)의 스탯이 분리되어 집계되고, 리그 내 동명이인(예: 김재현, 이재학 등)의 기록이 뭉개지던 현상이 발생했습니다.
-   - **해결**: 모든 집계 로직을 KBO 고유 식별자(`pcode`) 기준으로 리팩토링하고 최종 출력 시점에만 이름을 매핑하여 데이터 누수 및 충돌을 완전히 제거했습니다.
-2. **투수 이닝(IP) 소수점 표기법 충돌**:
-   - `kbo_sabermetrics.py` 파서는 10진수 소수점 반올림(`round(Outs/3.0, 1)`, 예: `180.7`)을 사용했으나, 검증기(`fast_local_validator.py`)는 소수점 이하 자리(`.7`)를 야구식 아웃카운트 개수로 오인해 해석하며 대량의 오차가 나타났습니다.
-   - **해결**: 투수 `IP` 컬럼 포맷을 야구식 표기법(`st['Outs'] // 3 + (st['Outs'] % 3) / 10.0`, 예: `180.2`)으로 출력하도록 전면 일치시켰습니다.
-3. **투수 HBP(몸에 맞는 공) 전수 누락**:
-   - 네이버 스포츠 API GW 스펙상 `"hbp"` 단독 필드가 누락되어 사사구 통합 컬럼 `"bbhp"`로 기재되던 특성 때문에, HBP가 0으로 집계되어 FIP 등 세이버메트릭스 지표 왜곡이 있었습니다.
-   - **해결**: `"bbhp"`(사사구) 값에서 `"bb"`(볼넷) 값을 차감한 `bbhp - bb` 공식으로 HBP 데이터를 온전히 정밀 복원하였습니다.
+### 1) 봇 구동 방법
+```bash
+# 디스코드 봇 백그라운드 기동
+python bots/kbo_discord_bot.py
+```
 
-### 2) 1대1 다이렉트 보정 프로세스 & JSON 분리
-* 로그 텍스트를 파싱하던 구버전의 간접 보정 방식에서 탈피하여, 완벽한 네이버 공식 누적 데이터(`naver_pitchers.pkl` 및 타자 공식 스탯)와 우리의 순수 파싱 스탯을 직접 1대1 비교 연산하는 `generate_direct_adjustments.py`를 구축했습니다.
-* 연산된 절대 보정치는 코드 내부 하드코딩 대신 `saber_data/adjustments_{year}.json` 파일로 모듈식 분리하여 런타임에 동적으로 로딩하도록 개선하여 가독성을 높였습니다.
+### 2) 주요 기능 및 명령어
+* **`!setup`** — `KBO 브리핑 센터` 11개 구단별 채널 및 비공개 `💡 아이디어 메모장` 카테고리/채널을 자동 셋업합니다. (`아이디어-메모장` 채널은 본인과 봇에게만 비공개로 개설됩니다.)
+* **`!scrape`** — KBO 공식 뉴스, 네이버 속보, 엠엘비파크 글을 실시간 수집하여 24시간 이내 최신 기사만 각 구단/KBO 채널에 자동 라우팅하여 배포합니다. (중복 전송은 로컬 캐시 `saber_data/posted_links.json`를 통해 영구 방지됩니다.)
+* **`⏰ 정기 자동 브리핑`** — 봇 실행 시 백그라운드 스케줄러가 매일 **오전 08:30** 및 **오후 18:30**에 무인 브리핑 배포를 자동으로 수행합니다.
 
-### 3) 2017~2026 정밀 정합 자동화 파이프라인
-* 2017시즌부터 2026시즌 전체의 데이터에 대해 보정 JSON 삭제 ➡️ 순수 raw CSV 파싱 ➡️ 정답 대조 및 보정치 재계산 ➡️ 보정치가 적용된 0오차 최종 CSV 재생성 단계를 One-Click으로 자동 수행하는 **`run_final_pipeline_all_years.py`** 파이프라인이 탑재되어 있습니다.
+### 3) 💡 개인 아이디어 메모장 명령어 (`#아이디어-메모장` 채널 전용)
+* **`!add [내용]`** — 새로운 기획 아이디어/글감을 등록합니다.
+* **`!list`** / **`!todo`** — 미완료(TODO) 상태인 기획 목록을 확인합니다.
+* **`!done [ID]`** — 해당 ID의 기획을 완료(DONE)로 처리합니다. (완료 즉시 루트의 `ideas.md`에 마크다운 리포트로 자동 컴파일 및 갱신이 이루어집니다.)
+* **`!memo`** — 메모장 채널 도움말을 출력합니다.
 
 ---
 
 ## 🚀 5. 신규 기능 실행 가이드 (데일리 업데이트, WAR, 시뮬레이터)
 
-### 1) 데일리 실시간 수집 및 파이프라인 자동 갱신 (`daily_kbo_updater.py`)
-진행 중인 2026시즌의 새로운 경기 데이터를 매일 증분 적재하고, 전체 세이버메트릭스 및 WAR 통계를 자동으로 갱신합니다.
+### 1) 데일리 실시간 수집 및 파이프라인 자동 갱신 (`utils/daily_kbo_updater.py`)
 ```bash
 # 최근 3일간의 종료된 경기를 검사하고, 누락된 경기를 다운로드한 뒤 자동으로 파이프라인을 갱신합니다.
-python daily_kbo_updater.py --days 3
+python utils/daily_kbo_updater.py --days 3
 ```
 
-### 2) KBO 맞춤형 WAR(승리 기여도) 엔진 (`kbo_war_engine.py`)
-리그 환경의 득점 규모에 따른 wOBA 스케일과 FIP 상수를 동적으로 계산하고, 문자중계 Roster로부터 포지션 조정값(`PosAdj`)을 파싱하여 세이버메트릭스 `WAR` 지표를 산출합니다.
+### 2) KBO 맞춤형 WAR(승리 기여도) 엔진 (`analytics/kbo_war_engine.py`)
 ```bash
-# 특정 시즌(예: 2026)의 타자/투수 WAR 지표를 연산하여 CSV 파일에 덮어씁니다.
-python kbo_war_engine.py --year 2026
+# 특정 시즌의 타자/투수 WAR 지표를 연산하여 CSV 파일에 갱신합니다.
+python analytics/kbo_war_engine.py --year 2026
 ```
-* **생성된 세이버 지표**:
-  - **타자**: `wOBA`, `wRC+` (조정 득점 창출력), `wRAA` (가중 득점 기여), `WAR` (승리 기여도), `Position` (주 수비 위치)
-  - **투수**: `FIP`, `K/9`, `BB/9`, `WAR`
 
-### 3) 몬테카를로 경기 시뮬레이터 및 승패 예측 (`kbo_match_simulator.py`)
-특정 시즌의 누적 스탯을 기반으로 홈/원정팀의 베스트 9인 라인업과 1선발 투수를 자동 선출하여 9이닝 마르코프 체인 가상 플레이를 몬테카를로 시뮬레이션(2,000회)하여 승리 확률 분포를 예측합니다.
+### 3) 몬테카를로 경기 시뮬레이터 및 승패 예측 (`simulation/kbo_match_simulator.py`)
 ```bash
-# KIA(원정) 대 삼성(홈)의 경기 예측 시뮬레이션을 2,000회 가동합니다.
-python kbo_match_simulator.py --home 삼성 --away KIA --sims 2000
+# 몬테카를로 시뮬레이션(2,000회)을 가동하여 승률과 득점 분포를 예측합니다.
+python simulation/kbo_match_simulator.py --home 삼성 --away KIA --sims 2000
 ```
-* **시뮬레이터 예측 보고서 예시**:
-  ```text
-  ==================================================
-  🔮 [예측 결과 보고서] KIA vs 삼성
-  ==================================================
-  🏆 삼성 승률: 49.0% (981승)
-  🏆 KIA 승률: 49.9% (997승)
-  🤝 무승부 확률: 1.1% (22무)
-  --------------------------------------------------
-  📈 평균 예상 득점: KIA 5.2 vs 삼성 4.9
-  ==================================================
-  ```

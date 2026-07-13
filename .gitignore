@@ -33,3 +33,15 @@ Thumbs.db
 *.njsproj
 *.sln
 *.swp
+
+# 환경변수 및 개인 설정
+.env
+
+# 캐시 및 로컬 데이터
+saber_data/posted_links.json
+saber_data/ideas.json
+saber_data/daily_news_*.md
+saber_data/adjustments_*.json
+saber_data/kbo_*_saber_*_old.csv
+validation_errors_*.log
+
