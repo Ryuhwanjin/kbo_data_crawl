@@ -54,7 +54,9 @@ def naver_ip_to_outs(ip_str):
         return 0
 
 def run_bulk_validator(year, player_type="batter"):
-    log_file = f'validation_errors_{player_type}_{year}.log'
+    os.makedirs('logs', exist_ok=True)
+    os.makedirs('saber_data', exist_ok=True)
+    log_file = f'logs/validation_errors_{player_type}_{year}.log'
     # Configure logging dynamically
     logger = logging.getLogger(player_type)
     logger.setLevel(logging.INFO)
@@ -65,7 +67,7 @@ def run_bulk_validator(year, player_type="batter"):
     fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
     logger.addHandler(fh)
     
-    parsed_file = f"kbo_{player_type}_saber_{year}.csv"
+    parsed_file = f"saber_data/kbo_{player_type}_saber_{year}.csv"
     
     if not os.path.exists(parsed_file):
         logger.error(f"필수 CSV 파일이 없습니다. kbo_sabermetrics.py --year {year} 를 먼저 실행하세요.")
