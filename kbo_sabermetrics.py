@@ -67,6 +67,17 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                     break
             
             for opt in text_options:
+                # [비디오 판독 아웃] 판독 번복으로 세이프가 아웃이 된 상황 처리
+                if opt.get("type") == 7:
+                    raw_text = str(opt.get("text", ""))
+                    text = raw_text.replace(" ", "")
+                    p_name = opt.get("currentGameState", {}).get("pitcher", "Unknown")
+                    if p_name != "Unknown":
+                        if p_name not in pitchers:
+                            pitchers[p_name] = {'Outs': 0, 'H': 0, 'HR': 0, 'BB': 0, 'HBP': 0, 'SO': 0, 'PA': 0}
+                        if "세이프->아웃" in text or "세이프에서아웃" in text or "아웃으로번복" in text:
+                            pitchers[p_name]['Outs'] += 1
+
                 # [주자 아웃] 견제사, 도루실패 등 타석 결과와 무관하게 아웃카운트가 올라가는 주자 아웃 처리
                 if opt.get("type") == 14:
                     raw_text = str(opt.get("text", ""))
@@ -123,9 +134,13 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                         batters[b_name]['2B'] += 1
                         pitchers[p_name]['H'] += 1
                     elif ("1루타" in text or "안타" in text or "내야안타" in text) and "무안타" not in text and "실책" not in text:
-                        batters[b_name]['1B'] += 1
-                        pitchers[p_name]['H'] += 1
-                    elif "볼넷" in text or "고의4구" in text:
+                        # [노이즈 방어] 안타성 타구 아웃/잡힘 예외 차단
+                        if any(x in text for x in ["아웃", "잡혔", "플라이", "뜬공", "땅볼", "직격아웃"]):
+                            pitchers[p_name]['Outs'] += 1
+                        else:
+                            batters[b_name]['1B'] += 1
+                            pitchers[p_name]['H'] += 1
+                    elif "볼넷" in text or "고의4구" in text or "고의사구" in text:
                         batters[b_name]['BB'] += 1
                         pitchers[p_name]['BB'] += 1
                         is_ab = False
@@ -133,7 +148,7 @@ def parse_sabermetrics_for_year(year, base_dir="kbo_data"):
                         batters[b_name]['HBP'] += 1
                         pitchers[p_name]['HBP'] += 1
                         is_ab = False
-                    elif "삼진" in text or "낫아웃" in text or "루킹" in text or "헛스윙" in text:
+                    elif any(x in text for x in ["삼진", "낫아웃", "루킹", "헛스윙", "스트라이크아웃", "스윙아웃"]):
                         batters[b_name]['SO'] += 1
                         pitchers[p_name]['SO'] += 1
                         pitchers[p_name]['Outs'] += 1
