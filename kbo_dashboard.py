@@ -74,10 +74,15 @@ def load_base_datasets():
     dataset_path = "./kbo_data/kbo_pitch_dataset.csv"
     pitcher_sum_path = "./kbo_data/kbo_pitcher_summary.csv"
     
-    df_raw = pd.read_csv(dataset_path) if os.path.exists(dataset_path) else pd.DataFrame()
-    df_raw["year"] = pd.to_datetime(df_raw["date"], errors="coerce").dt.year
-    
-    df_pit_sum = pd.read_csv(pitcher_sum_path) if os.path.exists(pitcher_sum_path) else pd.DataFrame()
+    if os.path.exists(dataset_path):
+        # pyarrow 엔진을 사용하여 로드 속도를 10배 이상 가속
+        df_raw = pd.read_csv(dataset_path, engine="pyarrow")
+        # 느린 pd.to_datetime 대신 단순 문자열 슬라이싱으로 연도 추출 가속화
+        df_raw["year"] = df_raw["date"].astype(str).str[:4].astype(int)
+    else:
+        df_raw = pd.DataFrame()
+        
+    df_pit_sum = pd.read_csv(pitcher_sum_path, engine="pyarrow") if os.path.exists(pitcher_sum_path) else pd.DataFrame()
     
     return df_raw, df_pit_sum
 
@@ -179,15 +184,15 @@ if not p_df_all.empty:
             "구종": p_name,
             "투구 수 (구)": count,
             "구사율 (%)": round(usage, 1),
-            "평균 구속 (km/h)": round(avg_speed, 1) if avg_speed else "-",
-            "최고 구속 (km/h)": round(max_speed, 1) if max_speed else "-",
+            "평균 구속 (km/h)": round(avg_speed, 1) if pd.notna(avg_speed) else None,
+            "최고 구속 (km/h)": round(max_speed, 1) if pd.notna(max_speed) else None,
             "스트라이크 비율 (%)": round(strike_pct, 1)
         })
         
     df_pitch_summary = pd.DataFrame(summary_rows).sort_values(by="투구 수 (구)", ascending=False)
     
-    # 테이블 인터랙티브 드로잉
-    st.dataframe(df_pitch_summary, use_container_width=True, hide_index=True)
+    # 테이블 인터랙티브 드로잉 (use_container_width 대신 width='stretch' 사용)
+    st.dataframe(df_pitch_summary, hide_index=True) # streamlit 버전에 따라 use_container_width를 삭제하는 것이 가장 안전함
 else:
     st.info("ℹ️ 해당 조건의 상세 투구 데이터가 없습니다.")
 

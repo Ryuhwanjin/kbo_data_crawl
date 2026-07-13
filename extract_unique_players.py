@@ -1,7 +1,6 @@
 import json
 import glob
 import pandas as pd
-from tqdm import tqdm
 import os
 
 def extract_unique_players():
@@ -17,8 +16,8 @@ def extract_unique_players():
     print(f"총 {len(files)}개의 JSON 파일을 스캔합니다.")
     unique_players = {} # pcode: name
     for idx, f in enumerate(files):
-        if (idx + 1) % 500 == 0:
-            print(f"🔄 JSON 파싱 진행 중: [{idx + 1}/{len(files)}] ({(idx+1)/len(files)*100:.1f}%)")
+        if (idx + 1) % 100 == 0:
+            print(f"🔄 JSON 파싱 진행 중: [{idx + 1}/{len(files)}] ({(idx+1)/len(files)*100:.1f}%)", flush=True)
             
         with open(f, 'r', encoding='utf-8') as fp:
             try:

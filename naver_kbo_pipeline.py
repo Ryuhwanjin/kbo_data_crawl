@@ -4,11 +4,9 @@ import glob
 import math
 import pandas as pd
 from datetime import datetime
+import re
 
 def calculate_plate_z(p):
-    """
-    등가속도 운동 방정식을 이용해 홈플레이트 통과 시점의 공 높이(plate_z, ft)를 계산합니다.
-    """
     y0 = p.get("y0")
     vy0 = p.get("vy0")
     ay = p.get("ay")
@@ -19,7 +17,7 @@ def calculate_plate_z(p):
     if None in [y0, vy0, ay, z0, vz0, az]:
         return None
         
-    target_y = p.get("crossPlateY", 0.7083) # 홈플레이트 중심 부근 위치 기본값 (약 0.7피트)
+    target_y = p.get("crossPlateY", 0.7083) 
     
     a = 0.5 * ay
     b = vy0
@@ -43,36 +41,29 @@ def calculate_plate_z(p):
     return plate_z
 
 def process_single_game(json_path):
-    """경기 JSON 파일을 파싱하여 정상 투구 데이터와 격리된 이상치 데이터를 분리 반환합니다."""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
     except Exception as e:
-        print(f"⚠️ 파일 로드 실패: {json_path} ({e})")
-        return [], []
+        return [], [], {}
         
     result_data = raw_data.get("result", {})
-    if not result_data:
-        return [], []
-        
     text_relay_data = result_data.get("textRelayData", {})
     if not text_relay_data:
-        return [], []
+        return [], [], {}
         
     game_id = text_relay_data.get("gameId")
     if not game_id:
-        return [], []
+        return [], [], {}
         
-    # 연도 유효성 검사 (이상치 감지용 플래그)
     is_valid_year = False
     try:
         year_val = int(game_id[:4])
         if 2000 <= year_val <= 2027:
             is_valid_year = True
-    except Exception:
+    except:
         pass
         
-    # 1. 라인업 기반 pcode -> 선수 이름 매핑 딕셔너리 빌드
     player_map = {}
     for lineup_side in ["homeLineup", "awayLineup"]:
         lineup = text_relay_data.get(lineup_side, {})
@@ -83,10 +74,9 @@ def process_single_game(json_path):
             if b.get("pcode"):
                 player_map[str(b["pcode"])] = b.get("name")
                 
-    # 2. 문자 중계 리스트 순회
     relays = text_relay_data.get("textRelays", [])
     if not relays:
-        return [], []
+        return [], [], {}
         
     date_str = game_id[:8]
     try:
@@ -96,121 +86,187 @@ def process_single_game(json_path):
         
     game_pitches = []
     game_outliers = []
+    game_pitcher_stats = {}
     
+    prev_out = 0
+    prev_home_score = 0
+    prev_away_score = 0
+    
+    # KBO JSON 이벤트 순서는 보통 relays가 최신순(앞이 9회, 뒤가 1회)이므로 reversed(relays)로 과거부터 훓습니다.
     for tr in reversed(relays):
         inn = tr.get("inn")
         text_opts = tr.get("textOptions", [])
-        pitch_opts = [o for o in text_opts if o.get("type") == 1 and o.get("pitchNum") is not None]
         pts_opts = tr.get("ptsOptions", [])
+        pts_map = {pts["ballcount"]: pts for pts in pts_opts if pts.get("ballcount") is not None}
         
-        pts_map = {}
-        for pts in pts_opts:
-            if pts.get("ballcount") is not None:
-                pts_map[pts["ballcount"]] = pts
-                
-        for p_opt in pitch_opts:
-            pitch_num = p_opt["pitchNum"]
-            speed_val = p_opt.get("speed")
+        # 💡 [버그 픽스]: textOptions 내부 또한 최신 투구/결과가 인덱스 0에 있고, 초구가 뒤에 있는 구조입니다!
+        # 따라서 시간 정방향(과거->현재)으로 이벤트를 재생(Play-by-play)하려면 reversed(text_opts) 를 써야 합니다!
+        for opt in reversed(text_opts):
+            current_state = opt.get("currentGameState", {})
+            opt_type = opt.get("type")
             
-            state = p_opt.get("currentGameState", {})
-            pitcher_code = str(state.get("pitcher")) if state.get("pitcher") else None
-            batter_code = str(state.get("batter")) if state.get("batter") else None
-            
+            pitcher_code = str(current_state.get("pitcher")) if current_state.get("pitcher") else None
             pitcher_name = player_map.get(pitcher_code, pitcher_code)
-            batter_name = player_map.get(batter_code, batter_code)
             
-            pts_data = pts_map.get(pitch_num, {})
-            plate_z = calculate_plate_z(pts_data) if pts_data else None
-            
-            pitch_record = {
-                "game_id": game_id,
-                "date": game_date,
-                "inning": inn,
-                "pitcher_name": pitcher_name,
-                "pitcher_code": pitcher_code,
-                "batter_name": batter_name,
-                "batter_code": batter_code,
-                "pitch_num": pitch_num,
-                "pitch_type": p_opt.get("stuff"),
-                "speed_kmh": float(speed_val) if speed_val and str(speed_val).replace('.','',1).isdigit() else None,
-                "pitch_result": p_opt.get("pitchResult"),
-                "text_comment": p_opt.get("text"),
-                "stance": pts_data.get("stance") if pts_data else None,
-                "release_x": pts_data.get("x0") if pts_data else None,
-                "release_y": pts_data.get("y0") if pts_data else None,
-                "release_z": pts_data.get("z0") if pts_data else None,
-                "plate_x": pts_data.get("crossPlateX") if pts_data else None,
-                "plate_z": plate_z,
-                "sz_top": pts_data.get("topSz") if pts_data else None,
-                "sz_bottom": pts_data.get("bottomSz") if pts_data else None
-            }
-            
-            # 연도가 올바르면 정상 데이터, 올바르지 않으면 이상치 리스트로 라우팅
-            if is_valid_year:
-                game_pitches.append(pitch_record)
-            else:
-                pitch_record["raw_game_id_prefix"] = game_id[:4] # 이상치 원인 기록용 추가
-                game_outliers.append(pitch_record)
+            curr_out = int(current_state.get("out", prev_out))
+            if curr_out < prev_out: 
+                prev_out = 0
                 
-    return game_pitches, game_outliers
+            curr_home_score = int(current_state.get("homeScore", prev_home_score))
+            curr_away_score = int(current_state.get("awayScore", prev_away_score))
+            
+            if pitcher_name and is_valid_year:
+                if pitcher_name not in game_pitcher_stats:
+                    game_pitcher_stats[pitcher_name] = {
+                        "year": year_val, "IP_outs": 0, "R": 0, "H": 0, "BB": 0, "SO": 0, "PA": 0
+                    }
+                    
+                if curr_out > prev_out:
+                    delta_out = curr_out - prev_out
+                    game_pitcher_stats[pitcher_name]["IP_outs"] += delta_out
+                    
+                delta_score = 0
+                if curr_home_score > prev_home_score:
+                    delta_score += (curr_home_score - prev_home_score)
+                if curr_away_score > prev_away_score:
+                    delta_score += (curr_away_score - prev_away_score)
+                    
+                if delta_score > 0:
+                    game_pitcher_stats[pitcher_name]["R"] += delta_score
+                    
+                if opt_type == 13:
+                    text_result = opt.get("text", "")
+                    game_pitcher_stats[pitcher_name]["PA"] += 1
+                    
+                    if re.search(r"안타|홈런|2루타|3루타", text_result):
+                        game_pitcher_stats[pitcher_name]["H"] += 1
+                    elif re.search(r"볼넷|몸에 맞는 볼|고의4구", text_result):
+                        game_pitcher_stats[pitcher_name]["BB"] += 1
+                    elif re.search(r"삼진", text_result):
+                        game_pitcher_stats[pitcher_name]["SO"] += 1
+                        
+                if opt_type == 1 and opt.get("pitchNum") is not None:
+                    pitch_num = opt.get("pitchNum")
+                    speed_val = opt.get("speed")
+                    
+                    batter_code = str(current_state.get("batter")) if current_state.get("batter") else None
+                    batter_name = player_map.get(batter_code, batter_code)
+                    
+                    pts_data = pts_map.get(pitch_num, {})
+                    plate_z = calculate_plate_z(pts_data) if pts_data else None
+                    
+                    pitch_record = {
+                        "game_id": game_id,
+                        "date": game_date,
+                        "inning": inn,
+                        "pitcher_name": pitcher_name,
+                        "pitcher_code": pitcher_code,
+                        "batter_name": batter_name,
+                        "batter_code": batter_code,
+                        "pitch_num": pitch_num,
+                        "pitch_type": opt.get("stuff"),
+                        "speed_kmh": float(speed_val) if speed_val and str(speed_val).replace('.','',1).isdigit() else None,
+                        "pitch_result": opt.get("pitchResult"),
+                        "text_comment": opt.get("text"),
+                        "stance": pts_data.get("stance") if pts_data else None,
+                        "release_x": pts_data.get("x0") if pts_data else None,
+                        "release_y": pts_data.get("y0") if pts_data else None,
+                        "release_z": pts_data.get("z0") if pts_data else None,
+                        "plate_x": pts_data.get("crossPlateX") if pts_data else None,
+                        "plate_z": plate_z,
+                        "sz_top": pts_data.get("topSz") if pts_data else None,
+                        "sz_bottom": pts_data.get("bottomSz") if pts_data else None
+                    }
+                    if is_valid_year:
+                        game_pitches.append(pitch_record)
+                    else:
+                        pitch_record["raw_game_id_prefix"] = game_id[:4]
+                        game_outliers.append(pitch_record)
+                        
+            prev_out = curr_out
+            prev_home_score = curr_home_score
+            prev_away_score = curr_away_score
+                
+    return game_pitches, game_outliers, game_pitcher_stats
 
 def main():
     root_dir = "./kbo_data"
     output_csv = "./kbo_data/kbo_pitch_dataset.csv"
-    outlier_csv = "./kbo_data/kbo_pitch_outliers.csv"
+    summary_csv = "./kbo_data/kbo_pitcher_summary.csv"
     
     print("=" * 60)
-    print("        KBO PTS 투구 데이터 이중 격리 정제 파이프라인 (ETL)")
-    print(f"        스캔 대상 디렉토리: {os.path.abspath(root_dir)}")
+    print("        KBO 투구 데이터 파이프라인 (자체 스탯 집계 엔진 탑재)")
     print("=" * 60)
     
     search_path = os.path.join(root_dir, "**", "kbo_relay_*.json")
     json_files = glob.glob(search_path, recursive=True)
     
-    print(f"🔍 총 {len(json_files)}개의 경기 JSON 파일을 감지했습니다.")
     if not json_files:
-        print("❌ 파싱할 JSON 파일이 없습니다.")
         return
         
     all_pitches = []
-    all_outliers = []
-    success_games = 0
+    global_pitcher_stats = {}
     
     for idx, fpath in enumerate(json_files, 1):
-        filename = os.path.basename(fpath)
-        pitches, outliers = process_single_game(fpath)
-        if pitches or outliers:
+        pitches, outliers, game_stats = process_single_game(fpath)
+        if pitches:
             all_pitches.extend(pitches)
-            all_outliers.extend(outliers)
-            success_games += 1
             
-    print("-" * 60)
-    print(f"정리 완료: {success_games}/{len(json_files)} 경기 파싱")
-    print(f"  - 정상 투구 레코드 수: {len(all_pitches)}개")
-    print(f"  - 이상치 투구 레코드 수: {len(all_outliers)}개")
-    print("-" * 60)
+        for p_name, st in game_stats.items():
+            year = st["year"]
+            key = f"{p_name}_{year}"
+            if key not in global_pitcher_stats:
+                global_pitcher_stats[key] = {
+                    "player_name": p_name, "year": year, 
+                    "IP_outs": 0, "R": 0, "H": 0, "BB": 0, "SO": 0, "PA": 0
+                }
+            g = global_pitcher_stats[key]
+            g["IP_outs"] += st["IP_outs"]
+            g["R"] += st["R"]
+            g["H"] += st["H"]
+            g["BB"] += st["BB"]
+            g["SO"] += st["SO"]
+            g["PA"] += st["PA"]
+            
+    print(f"✅ 투구 데이터 파싱 완료 (총 {len(all_pitches)}개)")
     
-    # 1. 정상 데이터 저장
     if all_pitches:
         df_normal = pd.DataFrame(all_pitches)
-        df_normal["year"] = pd.to_datetime(df_normal["date"], errors="coerce").dt.year
+        df_normal["year"] = df_normal["date"].astype(str).str[:4].astype(int)
         df_normal.to_csv(output_csv, index=False, encoding="utf-8-sig")
-        print(f"✅ 정상 데이터셋 저장 완료 -> {output_csv}")
-    else:
-        print("⚠️ 저장할 정상 데이터가 없습니다.")
+        print(f"✅ 투구 데이터셋 저장 완료 -> {output_csv}")
         
-    # 2. 이상치 데이터 격리 저장
-    if all_outliers:
-        df_outliers = pd.DataFrame(all_outliers)
-        df_outliers.to_csv(outlier_csv, index=False, encoding="utf-8-sig")
-        print(f"✅ 이상치 데이터 격리 저장 완료 -> {outlier_csv}")
-    else:
-        # 이상치가 없는 경우 기존 파일이 있다면 안전하게 제거
-        if os.path.exists(outlier_csv):
-            os.remove(outlier_csv)
-        print("ℹ️ 이상치 데이터가 검출되지 않았습니다.")
-        
-    print("============================================================")
+    if global_pitcher_stats:
+        summary_rows = []
+        for key, st in global_pitcher_stats.items():
+            ip_outs = st["IP_outs"]
+            er = st["R"]
+            h = st["H"]
+            bb = st["BB"]
+            pa = st["PA"]
+            
+            ip_float = ip_outs / 3.0
+            era = (er * 9.0) / ip_float if ip_float > 0 else 0.0
+            whip = (bb + h) / ip_float if ip_float > 0 else 0.0
+            ab_approx = pa - bb
+            avg = h / ab_approx if ab_approx > 0 else 0.0
+            
+            summary_rows.append({
+                "player_name": st["player_name"],
+                "year": st["year"],
+                "IP_float": round(ip_float, 1),
+                "ERA": round(era, 2),
+                "WHIP": round(whip, 2),
+                "AVG": round(avg, 3),
+                "SO": st["SO"],
+                "BB": bb,
+                "H": h,
+                "R": er
+            })
+            
+        df_summary = pd.DataFrame(summary_rows)
+        df_summary.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+        print(f"✅ 자체 산출 요약 통계 저장 완료 -> {summary_csv}")
 
 if __name__ == "__main__":
     main()
