@@ -13,7 +13,7 @@ except ImportError:
     pass
 
 # MLB 관련 해외 야구 차단용 블랙리스트 키워드 패턴
-MLB_BLACKLIST_PATTERN = r"오타니|다저스|샌프란시스코|이정후|김하성|배지환|mlb|m.l.b.|메이저리그|해외야구|에인절스|양키스|컵스|메츠|레드삭스|화이트삭스|블루제이스|파드리스|자이언츠\(mlb\)"
+MLB_BLACKLIST_PATTERN = r"오타니|다저스|샌프란|샌디에고|파드리스|블루제이스|에인절스|메츠|컵스|카디널스|화이트삭스|필리스|브레이브스|마린스|내셔널스|브루어스|로키스|디백스|매리너스|레인저스|애스트로스|양키스|레드삭스|이정후|김하성|배지환|고우석|최지만|mlb|m.l.b.|메이저리그|해외야구|메이저|해외파|월드시리즈|포스트시즌\(mlb\)|자이언츠\(mlb\)"
 
 def is_kbo_only(title, summary=""):
     """제목과 요약에서 메이저리그 관련 키워드를 검출하여 KBO 순수 기사인지 판별"""
@@ -90,46 +90,50 @@ def scrape_kbo_official():
     return press_list[:15] # 15개 확보
 
 def scrape_naver_news():
-    """네이버 야구 뉴스 메인 웹 API 호출로 속보 기사 수집 (수집량 pageSize=80 확장 + KBO 필터링)"""
-    url = "https://sports.news.naver.com/kbaseball/news/list?page=1&pageSize=80"
+    """네이버 야구 뉴스 메인 웹 API 호출로 다중 페이지 속보 기사 수집 (3페이지 다중 스캔 + KBO 필터링)"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     naver_list = []
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            news_list = data.get("list", [])
-            for item in news_list:
-                title = item.get("title", "")
-                sub_content = item.get("subContent", "")
-                
-                # MLB 관련 해외 야구 뉴스 필터링
-                if not is_kbo_only(title, sub_content):
-                    continue
+    # page=1부터 3까지 순회하여 다량의 뉴스 풀 확보 (최대 240개 수집)
+    for page in range(1, 4):
+        url = f"https://sports.news.naver.com/kbaseball/news/list?page={page}&pageSize=80"
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                news_list = data.get("list", [])
+                for item in news_list:
+                    title = item.get("title", "")
+                    sub_content = item.get("subContent", "")
                     
-                oid = item.get("oid", "")
-                aid = item.get("aid", "")
-                link = f"https://sports.news.naver.com/kbaseball/news/read?oid={oid}&aid={aid}"
-                office = item.get("officeName", "네이버 스포츠")
-                date_str = item.get("datetime", "")
-                
-                cleaned_sum = clean_summary(sub_content)
-                
-                naver_list.append({
-                    "title": title,
-                    "link": link,
-                    "date": date_str,
-                    "office": office,
-                    "summary": cleaned_sum,
-                    "importance": calculate_importance(title, sub_content),
-                    "source": "네이버"
-                })
-    except Exception as e:
-        print(f"⚠️ 네이버 야구 뉴스 수집 중 오류 발생: {e}")
-        
+                    # MLB 관련 해외 야구 뉴스 필터링
+                    if not is_kbo_only(title, sub_content):
+                        continue
+                        
+                    oid = item.get("oid", "")
+                    aid = item.get("aid", "")
+                    link = f"https://sports.news.naver.com/kbaseball/news/read?oid={oid}&aid={aid}"
+                    office = item.get("officeName", "네이버 스포츠")
+                    date_str = item.get("datetime", "")
+                    
+                    cleaned_sum = clean_summary(sub_content)
+                    
+                    # 이미 리스트에 담긴 링크인지 중복 검사
+                    if not any(x['link'] == link for x in naver_list):
+                        naver_list.append({
+                            "title": title,
+                            "link": link,
+                            "date": date_str,
+                            "office": office,
+                            "summary": cleaned_sum,
+                            "importance": calculate_importance(title, sub_content),
+                            "source": "네이버"
+                        })
+        except Exception as e:
+            print(f"⚠️ 네이버 야구 뉴스 수집 중 오류 발생 (page {page}): {e}")
+            
     return naver_list
 
 def scrape_mlbpark():

@@ -44,4 +44,8 @@ saber_data/daily_news_*.md
 saber_data/adjustments_*.json
 saber_data/kbo_*_saber_*_old.csv
 validation_errors_*.log
+saber_data/user_playlists.json
+logs/
+.agents/
+.gemini/
 

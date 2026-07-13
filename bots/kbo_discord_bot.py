@@ -29,6 +29,33 @@ try:
 except ImportError:
     pass
 
+# 📦 사용자 지정 플레이리스트 영속 스토리지 설정
+PLAYLIST_FILE = os.path.join(ROOT_DIR, "saber_data", "user_playlists.json")
+
+def load_user_playlist():
+    if not os.path.exists(PLAYLIST_FILE):
+        return []
+    try:
+        with open(PLAYLIST_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ 플레이리스트 로드 실패: {e}")
+        return []
+
+def save_user_playlist(playlist_data):
+    try:
+        os.makedirs(os.path.dirname(PLAYLIST_FILE), exist_ok=True)
+        with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(playlist_data, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        print(f"⚠️ 플레이리스트 저장 실패: {e}")
+        return False
+
+def clean_youtube_url(url):
+    """더 이상 믹스 URL을 자르지 않고 통과시킵니다 (playlist_items에서 20곡 컷 처리)."""
+    return url
+
 from utils import kbo_idea_memo
 from crawlers import kbo_news_scraper
 
@@ -39,6 +66,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
+
+# 🎵 macOS 오디오 스트리밍을 위한 libopus 수동 로딩 설정
+if not discord.opus.is_loaded():
+    try:
+        discord.opus.load_opus('/opt/homebrew/lib/libopus.dylib')
+        print("🟢 [Audio Engine] libopus 동적 라이브러리 로드 성공!")
+    except Exception as e:
+        print(f"⚠️ [Audio Engine] libopus 로드 실패: {e}. 음악 재생 기능이 제한될 수 있습니다.")
 
 # 구단명 한글/영문 매칭 키워드 맵 (채널 분류용 정규식 패턴)
 TEAM_KEYWORDS = {
@@ -59,7 +94,7 @@ ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
-    'noplaylist': False,
+    'noplaylist': True,
     'nocheckcertificate': True,
     'ignoreerrors': True,
     'logtostderr': False,
@@ -85,6 +120,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True):
+        url = clean_youtube_url(url)
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
         if not data:
@@ -198,8 +234,15 @@ def parse_article_datetime(date_str):
         return datetime.datetime.strptime(clean_str, "%Y-%m-%d %H:%M")
     except ValueError:
         pass
+        
+    # 2) YYYY.MM.DD HH:MM (점 구분자 포함 시분 포맷)
+    try:
+        clean_date = clean_str.replace(".", "-")
+        return datetime.datetime.strptime(clean_date, "%Y-%m-%d %H:%M")
+    except ValueError:
+        pass
     
-    # 2) YYYY.MM.DD 또는 YYYY-MM-DD (KBO 공식 포맷)
+    # 3) YYYY.MM.DD 또는 YYYY-MM-DD (KBO 공식 포맷 - 시간 없음)
     try:
         clean_date = clean_str.replace(".", "-")
         return datetime.datetime.strptime(clean_date, "%Y-%m-%d")
@@ -245,10 +288,9 @@ async def broadcast_daily_issues(guild):
             
         # 2. scrape 실행 시각 기준 최근 24시간 이내 기사 판정 (Recency Filter)
         pub_time = parse_article_datetime(item.get('date', ''))
-        # 시각차가 24시간(86400초) 이내인지 판정
+        # 시각차가 24시간(86400초)을 초과한 과거 기사만 스킵하고 최신 기사는 보존
         time_diff = now - pub_time
-        if time_diff.total_seconds() > 86400 or time_diff.total_seconds() < 0:
-            # 24시간 초과 기사는 과감히 스킵
+        if time_diff.total_seconds() > 86400:
             continue
             
         filtered_news.append(item)
@@ -269,8 +311,8 @@ async def broadcast_daily_issues(guild):
         # 중요도(별점 개수) 기준 내림차순 정렬
         sorted_items = sorted(items, key=lambda x: len(x.get('importance', '★★★☆☆')), reverse=True)
         
-        # 구단별 최대 5개 뉴스 선별
-        top_items = sorted_items[:5]
+        # 구단별 최대 10개 뉴스 선별 (풍부한 자료 수신용)
+        top_items = sorted_items[:10]
         
         for item in top_items:
             # 뉴스 테마별 아이콘 및 분류명 지정
@@ -323,6 +365,26 @@ async def broadcast_daily_issues(guild):
 # ---------------------------------------------------------------------------
 # ⏰ 백그라운드 자동화 스케줄러 (Auto-Scheduler)
 # ---------------------------------------------------------------------------
+# live game states 캐시용 딕셔너리
+game_states_cache = {}
+
+async def fetch_today_games(date_str):
+    url = f"https://api-gw.sports.naver.com/schedule/games?upperCategoryId=kbaseball&fromDate={date_str}&toDate={date_str}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://sports.news.naver.com/kbaseball/schedule/index"
+    }
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("result", {}).get("games", [])
+    except Exception as e:
+        print(f"⚠️ [Schedule API] 호출 에러: {e}")
+    return []
+
 @tasks.loop(minutes=1)
 async def auto_news_scraper():
     """매 분마다 현재 시각을 검사하여 지정된 시간(08:30, 18:30)에 뉴스 배포 트리거"""
@@ -363,6 +425,86 @@ async def auto_news_scraper():
             except Exception as e:
                 print(f"❌ [Scheduler] 서버 '{guild.name}' 배포 중 오류 발생: {e}")
 
+@tasks.loop(minutes=3)
+async def track_live_games():
+    """3분마다 오늘 진행 중인 경기 상태를 조회하여, 종료/취소 상태 변화 시 디스코드 알림 발송"""
+    now = datetime.datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    
+    # 05:00 ~ 23:59 시간대에만 활성화 (일반적으로 야구 경기 진행 시간대)
+    if now.hour < 5 or now.hour > 23:
+        return
+        
+    games = await fetch_today_games(today_str)
+    kbo_games = [g for g in games if g.get("categoryId") == "kbo"]
+    
+    for g in kbo_games:
+        game_id = g.get("gameId")
+        if not game_id:
+            continue
+            
+        home = g.get("homeTeamName", "홈")
+        away = g.get("awayTeamName", "원정")
+        home_score = g.get("homeTeamScore", 0)
+        away_score = g.get("awayTeamScore", 0)
+        status_code = g.get("statusCode", "BEFORE")
+        status_info = g.get("statusInfo", "")
+        is_cancelled = g.get("cancel", False)
+        
+        prev = game_states_cache.get(game_id)
+        
+        # 1. 경기 취소 감지
+        if (is_cancelled or status_info == "경기취소") and (not prev or not prev.get("cancelled")):
+            game_states_cache[game_id] = {"cancelled": True, "status": "CANCEL"}
+            
+            for guild in client.guilds:
+                kbo_chan = find_channel_by_name("kbo", guild.text_channels)
+                if kbo_chan:
+                    embed = discord.Embed(
+                        title=f"🌧️ [우천 취소 알림] {away} vs {home}",
+                        description=f"오늘 예정된 **{away} vs {home}** 경기가 우천 등의 사유로 취소되었습니다.",
+                        color=0x9CA3AF,
+                        timestamp=datetime.datetime.utcnow()
+                    )
+                    await kbo_chan.send(embed=embed)
+            continue
+            
+        # 2. 경기 종료 감지
+        if status_code == "RESULT" and (not prev or prev.get("status") != "RESULT"):
+            game_states_cache[game_id] = {"cancelled": False, "status": "RESULT"}
+            
+            winner = g.get("winner", "DRAW")
+            if winner == "HOME":
+                w_text = f"🏆 승리: **{home}**"
+            elif winner == "AWAY":
+                w_text = f"🏆 승리: **{away}**"
+            else:
+                w_text = "🤝 무승부"
+                
+            for guild in client.guilds:
+                kbo_chan = find_channel_by_name("kbo", guild.text_channels)
+                if kbo_chan:
+                    embed = discord.Embed(
+                        title=f"🏁 [경기 종료 알림] {away} vs {home}",
+                        description=f"**{away} {away_score} : {home_score} {home}**\n\n{w_text}",
+                        color=0x10B981,
+                        timestamp=datetime.datetime.utcnow()
+                    )
+                    embed.set_footer(text=f"구장: {g.get('stadium', 'KBO 경기장')} | 종료 정보: {status_info}")
+                    await kbo_chan.send(embed=embed)
+                    
+            # 3. 경기 종료 즉시 daily_kbo_updater를 가동하여 증분 수집 및 파이프라인 갱신 (비동기 subprocess)
+            print(f"⚙️ [{game_id}] 경기 종료 감지됨 ➡️ daily_kbo_updater 가동을 시도합니다.")
+            import subprocess
+            try:
+                subprocess.Popen([sys.executable, "utils/daily_kbo_updater.py", "--days", "3"])
+            except Exception as e:
+                print(f"⚠️ [Scheduler] daily_kbo_updater 가동 실패: {e}")
+                
+        # 4. 경기 상태 기록 갱신
+        if status_code == "RUNNING" and (not prev or prev.get("status") != "RUNNING"):
+            game_states_cache[game_id] = {"cancelled": False, "status": "RUNNING"}
+
 # 🤖 디스코드 이벤트 핸들러
 @client.event
 async def on_ready():
@@ -375,6 +517,10 @@ async def on_ready():
     if not auto_news_scraper.is_running():
         auto_news_scraper.start()
         print("⏰ 백그라운드 무인 브리핑 스케줄러(08:30 / 18:30) 가동 완료!")
+        
+    if not track_live_games.is_running():
+        track_live_games.start()
+        print("⏰ 백그라운드 실시간 경기 모니터링(3분 주기) 가동 완료!")
     print("==================================================")
 
 @client.event
@@ -387,6 +533,24 @@ async def on_message(message):
         
     content = message.content.strip()
     guild_id = message.guild.id if message.guild else None
+    
+    # 🎵 음악 전용 채널 격리 가드 로직
+    music_commands = [
+        "!join", "!leave", "!stop", "!play", "!play_saved", "!pls",
+        "!skip", "!pause", "!resume", "!queue", "!q", "!remove",
+        "!del", "!clear", "!shuffle"
+    ]
+    is_music_cmd = False
+    for cmd in music_commands:
+        if content == cmd or content.startswith(cmd + " "):
+            is_music_cmd = True
+            break
+            
+    if is_music_cmd:
+        channel_name = message.channel.name if hasattr(message.channel, "name") else ""
+        if not ("음악" in channel_name or "music" in channel_name):
+            await message.channel.send("⚠️ 음악 관련 명령어는 **`#음악`** 채널에서만 사용하실 수 있습니다.")
+            return
     
     # 💡 글감 메모 기능
     if content.startswith("!add "):
@@ -441,71 +605,85 @@ async def on_message(message):
         if not found:
             await message.channel.send("❌ 해당 ID를 찾지 못했습니다.")
 
-    # 📰 자동 채널 셋업 및 뉴스 크롤러
+    # 📰 자동 채널 셋업 및 뉴스 크롤러 (기존 중복 채널 일괄 Clean 후 Rebuild)
     elif content == "!setup":
         guild = message.guild
         if not guild:
             await message.channel.send("⚠️ 서버에서만 사용할 수 있는 명령어입니다.")
             return
-        await message.channel.send("🛠️ KBO 브리핑 센터 카테고리 및 11개 구단별 채널 + 개인 아이디어 메모장 셋업을 가동합니다...")
+            
+        await message.channel.send("🧹 디스코드 KBO 카테고리 및 중복 채널의 일괄 청소(Clean)를 시작합니다...")
+        
+        categories_to_clean = ["KBO 브리핑 센터", "💡 아이디어 메모장"]
+        deleted_channels_count = 0
+        
+        for cat_name in categories_to_clean:
+            matched_categories = [c for c in guild.categories if c.name == cat_name]
+            for cat in matched_categories:
+                for chan in cat.text_channels:
+                    try:
+                        await chan.delete()
+                        deleted_channels_count += 1
+                    except Exception as e:
+                        print(f"⚠️ 채널 삭제 에러 ({chan.name}): {e}")
+                try:
+                    await cat.delete()
+                except Exception as e:
+                    print(f"⚠️ 카테고리 삭제 에러 ({cat.name}): {e}")
+                    
+        await message.channel.send(f"✅ 기존 KBO 카테고리 및 채널 `{deleted_channels_count}개` 청소 완료. 신규 셋업을 시작합니다...")
+
         try:
             # ── KBO 브리핑 센터 카테고리 및 구단 채널 생성
             category_name = "KBO 브리핑 센터"
-            category = discord.utils.get(guild.categories, name=category_name)
-            if not category:
-                category = await guild.create_category(category_name)
-            channels_to_create = ["kbo"] + list(TEAM_KEYWORDS.keys())
+            category = await guild.create_category(category_name)
+            
+            channels_to_create = ["kbo", "음악"] + list(TEAM_KEYWORDS.keys())
             created = 0
             for chan_name in channels_to_create:
-                if not discord.utils.get(category.text_channels, name=chan_name):
-                    await guild.create_text_channel(chan_name, category=category)
-                    created += 1
+                await guild.create_text_channel(chan_name, category=category)
+                created += 1
 
             # ── 💡 개인 아이디어 메모장 카테고리 및 채널 생성
             memo_category_name = "💡 아이디어 메모장"
-            memo_category = discord.utils.get(guild.categories, name=memo_category_name)
-            if not memo_category:
-                memo_category = await guild.create_category(memo_category_name)
+            memo_category = await guild.create_category(memo_category_name)
 
-            memo_chan = discord.utils.get(memo_category.text_channels, name="아이디어-메모장")
-            if not memo_chan:
-                # 봇과 채널 소유자만 볼 수 있도록 권한 오버라이드 설정
-                overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                    guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                    message.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                }
-                memo_chan = await guild.create_text_channel(
-                    "아이디어-메모장",
-                    category=memo_category,
-                    topic="✏️ 개인 아이디어 & 기획 메모장 | !add / !list / !done / !memo",
-                    overwrites=overwrites
-                )
-                created += 1
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                message.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            }
+            memo_chan = await guild.create_text_channel(
+                "아이디어-메모장",
+                category=memo_category,
+                topic="✏️ 개인 아이디어 & 기획 메모장 | !add / !list / !done / !memo",
+                overwrites=overwrites
+            )
+            created += 1
 
-                # 신규 메모장 채널에 Welcome embed 발송
-                welcome_embed = discord.Embed(
-                    title="✏️ 아이디어 메모장 채널에 오신 것을 환영합니다!",
-                    description="이곳은 **개인 전용** 아이디어 & 기획 메모 공간입니다.\n자유롭게 떠오르는 생각을 기록해 보세요! 💭",
-                    color=0x8B5CF6
-                )
-                welcome_embed.add_field(
-                    name="📝 사용 가능한 명령어",
-                    value=(
-                        "`!add [내용]` — 새 아이디어 메모 등록\n"
-                        "`!list` — 미완료(TODO) 아이디어 전체 조회\n"
-                        "`!done [ID]` — 해당 ID 아이디어 완료 처리\n"
-                        "`!memo` — 이 채널 도움말 다시 보기"
-                    ),
-                    inline=False
-                )
-                welcome_embed.add_field(
-                    name="🔒 채널 공개 범위",
-                    value="이 채널은 **비공개** 설정입니다. 서버의 다른 멤버에게 보이지 않습니다.",
-                    inline=False
-                )
-                welcome_embed.set_footer(text="💡 아이디어가 떠오를 때마다 !add 로 바로 기록하세요!")
-                await memo_chan.send(embed=welcome_embed)
+            # 신규 메모장 채널에 Welcome embed 발송
+            welcome_embed = discord.Embed(
+                title="✏️ 아이디어 메모장 채널에 오신 것을 환영합니다!",
+                description="이곳은 **개인 전용** 아이디어 & 기획 메모 공간입니다.\n자유롭게 떠오르는 생각을 기록해 보세요! 💭",
+                color=0x8B5CF6
+            )
+            welcome_embed.add_field(
+                name="📝 사용 가능한 명령어",
+                value=(
+                    "`!add [내용]` — 새 아이디어 메모 등록\n"
+                    "`!list` — 미완료(TODO) 아이디어 전체 조회\n"
+                    "`!done [ID]` — 해당 ID 아이디어 완료 처리\n"
+                    "`!memo` — 이 채널 도움말 다시 보기"
+                ),
+                inline=False
+            )
+            welcome_embed.add_field(
+                name="🔒 채널 공개 범위",
+                value="이 채널은 **비공개** 설정입니다. 서버의 다른 멤버에게 보이지 않습니다.",
+                inline=False
+            )
+            welcome_embed.set_footer(text="💡 아이디어가 떠오를 때마다 !add 로 바로 기록하세요!")
+            await memo_chan.send(embed=welcome_embed)
 
             await message.channel.send(
                 f"🎉 셋업 성공! `{created}개` 채널이 새로 연결되었습니다.\n"
@@ -547,6 +725,177 @@ async def on_message(message):
         except Exception as e:
             await message.channel.send(f"❌ 배포 실패: {e}")
 
+    elif content.startswith("!predict "):
+        args = content[9:].strip().split()
+        if len(args) < 2:
+            await message.channel.send("⚠️ 사용법: `!predict [원정팀] [홈팀]` (예: `!predict KIA 삼성`)")
+            return
+        away_arg, home_arg = args[0], args[1]
+        
+        from simulation.kbo_match_simulator import TEAM_NAME_MAP
+        away_team = TEAM_NAME_MAP.get(away_arg)
+        home_team = TEAM_NAME_MAP.get(home_arg)
+        
+        if not home_team or not away_team:
+            await message.channel.send(f"❌ 올바른 팀 이름을 기입해 주세요. (입력 원정: {away_arg}, 홈: {home_arg})")
+            return
+            
+        await message.channel.send(f"🔮 **{away_team} vs {home_team}** 경기 예측 몬테카를로 시뮬레이션(1,000회) 가동 중...")
+        try:
+            import subprocess
+            cmd = [sys.executable, "simulation/kbo_match_simulator.py", "--away", away_team, "--home", home_team, "--sims", "1000"]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=ROOT_DIR
+            )
+            stdout, stderr = await proc.communicate()
+            output = stdout.decode('utf-8')
+            
+            if proc.returncode != 0:
+                await message.channel.send(f"❌ 시뮬레이션 에러: {stderr.decode('utf-8')}")
+                return
+                
+            embed = discord.Embed(
+                title=f"🔮 KBO 경기 예측 결과 보고서: {away_team} vs {home_team}",
+                color=0x4F46E5,
+                timestamp=datetime.datetime.utcnow()
+            )
+            
+            lines = output.split('\n')
+            report_lines = []
+            capture = False
+            for line in lines:
+                if "==================================================" in line:
+                    if not capture:
+                        capture = True
+                        continue
+                    else:
+                        break
+                if capture:
+                    report_lines.append(line.strip())
+                    
+            if report_lines:
+                embed.description = "\n".join(report_lines)
+            else:
+                embed.description = f"```text\n{output[-2000:]}\n```"
+                
+            embed.set_footer(text="몬테카를로 마르코프체인 예측 시뮬레이터 v1.0")
+            await message.channel.send(embed=embed)
+        except Exception as e:
+            await message.channel.send(f"❌ 시뮬레이션 실패: {e}")
+
+    elif content.startswith("!chart "):
+        args = content[7:].strip().split()
+        if not args:
+            await message.channel.send("⚠️ 사용법: `!chart [선수명] [연도]` (예: `!chart 박건우 2024` 또는 `!chart 주현상`)")
+            return
+        player_name = args[0]
+        year = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+        
+        await message.channel.send(f"📊 **{player_name}** 선수의 데이터 분석 차트를 생성하고 있습니다. 잠시만 기다려 주세요...")
+        
+        try:
+            import pandas as pd
+            import subprocess
+            player_type = None
+            for y in [2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017]:
+                bat_csv = os.path.join(ROOT_DIR, "saber_data", f"kbo_batter_saber_{y}.csv")
+                pit_csv = os.path.join(ROOT_DIR, "saber_data", f"kbo_pitcher_saber_{y}.csv")
+                if os.path.exists(bat_csv):
+                    df = pd.read_csv(bat_csv)
+                    if player_name in df['Player'].values:
+                        player_type = "batter"
+                        break
+                if os.path.exists(pit_csv):
+                    df = pd.read_csv(pit_csv)
+                    if player_name in df['Player'].values:
+                        player_type = "pitcher"
+                        break
+                        
+            if not player_type:
+                player_type = "batter"
+                
+            cmd = [sys.executable, "visualization/naver_kbo_visualizer.py"]
+            if player_type == "batter":
+                cmd.extend(["--batter", player_name])
+            else:
+                cmd.extend(["--pitcher", player_name])
+                
+            if year:
+                cmd.extend(["--year", str(year)])
+                
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=ROOT_DIR
+            )
+            stdout, stderr = await proc.communicate()
+            
+            suffix = f"_{year}" if year else ""
+            chart_type = "spray_chart" if player_type == "batter" else "pitch_chart"
+            img_filename = f"{player_name}{suffix}_{chart_type}.png"
+            img_path = os.path.join(ROOT_DIR, "kbo_data", img_filename)
+            
+            if os.path.exists(img_path):
+                file = discord.File(img_path, filename=img_filename)
+                embed = discord.Embed(
+                    title=f"📊 KBO 스탯캐스트 분석: {player_name} " + (f"({year}년)" if year else "(전체 시즌)"),
+                    color=0x10B981
+                )
+                embed.set_image(url=f"attachment://{img_filename}")
+                embed.set_footer(text="PTS 스트라이크 존 등고선 및 스프레이 시각화 엔진")
+                await message.channel.send(file=file, embed=embed)
+                
+                os.remove(img_path)
+            else:
+                err_msg = stderr.decode('utf-8')
+                await message.channel.send(f"❌ 차트 생성 실패: 해당 선수의 데이터 표본이 없거나 올바르지 않은 선수명입니다.\n`{err_msg[:200]}`")
+        except Exception as e:
+            await message.channel.send(f"❌ 에러 발생: {e}")
+
+    elif content == "!today":
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        await message.channel.send(f"📅 **{today_str}** KBO 오늘 일정 및 스코어 상황을 조회하는 중...")
+        try:
+            games = await fetch_today_games(today_str)
+            kbo_games = [g for g in games if g.get("categoryId") == "kbo"]
+            if not kbo_games:
+                await message.channel.send(f"📅 **{today_str}** 예정된 KBO 경기 일정이 존재하지 않습니다.")
+                return
+                
+            embed = discord.Embed(
+                title=f"📅 {today_str} KBO 경기 대진표 & 스코어",
+                color=0x3B82F6,
+                timestamp=datetime.datetime.utcnow()
+            )
+            
+            schedule_text = ""
+            for g in kbo_games:
+                time_part = g.get("gameDateTime", "T18:30:00").split("T")[-1][:5]
+                status_info = g.get("statusInfo", "")
+                is_cancelled = g.get("cancel", False)
+                
+                home = g.get("homeTeamName", "홈")
+                away = g.get("awayTeamName", "원정")
+                
+                if is_cancelled or status_info == "경기취소":
+                    schedule_text += f"• `[{time_part}]` **{away} vs {home}** ➡️ 🌧️ **경기 취소**\n"
+                elif g.get("statusCode") == "RESULT":
+                    schedule_text += f"• `[{time_part}]` **{away} {g.get('awayTeamScore')} vs {g.get('homeTeamScore')} {home}** ➡️ 🏁 **종료**\n"
+                elif g.get("statusCode") == "RUNNING":
+                    schedule_text += f"• `[{time_part}]` **{away} {g.get('awayTeamScore')} vs {g.get('homeTeamScore')} {home}** ➡️ ⚡ **경기 중 ({status_info})**\n"
+                else:
+                    schedule_text += f"• `[{time_part}]` **{away} vs {home}** ➡️ ⏳ **대기 중**\n"
+                    
+            embed.description = schedule_text
+            embed.set_footer(text="실시간 경기 일정 & 스코어 알림 서비스")
+            await message.channel.send(embed=embed)
+        except Exception as e:
+            await message.channel.send(f"❌ 일정 조회 실패: {e}")
+
     # 🎵 음악 재생 기능
     elif content == "!join":
         if not message.author.voice:
@@ -561,7 +910,8 @@ async def on_message(message):
         await message.channel.send(f"🔊 음성 채널 **'{voice_channel.name}'**에 입장했습니다!")
 
     elif content.startswith("!play "):
-        url = content[6:].strip()
+        url = content[6:].strip().strip("<>")
+        url = clean_youtube_url(url)
         if not url:
             await message.channel.send("⚠️ 재생할 유튜브 주소 또는 검색어를 입력하세요.")
             return
@@ -579,7 +929,7 @@ async def on_message(message):
         
         try:
             loop = client.loop or asyncio.get_event_loop()
-            extract_opts = {'extract_flat': True, 'process': False}
+            extract_opts = {'extract_flat': True, 'process': False, 'noplaylist': False, 'playlist_items': '1-20'}
             ytdl_flat = yt_dlp.YoutubeDL({**ytdl_format_options, **extract_opts})
             data = await loop.run_in_executor(None, lambda: ytdl_flat.extract_info(url, download=False))
             
@@ -654,6 +1004,205 @@ async def on_message(message):
         else:
             await message.channel.send("⚠️ 봇이 음성 채널에 연결되어 있지 않습니다.")
 
+    elif content in ["!queue", "!q"]:
+        queue = music_queues[guild_id]
+        if not queue:
+            await message.channel.send("📭 현재 재생 대기열이 비어 있습니다.")
+            return
+            
+        max_display = 15
+        queue_text = ""
+        for i, song in enumerate(queue[:max_display]):
+            next_line = f"`{i+1}.` [{song['title']}]({song['url']})\n"
+            # 임베드 버퍼 한계 고려해 글자수 안전 가드
+            if len(queue_text) + len(next_line) > 1500:
+                queue_text += f"\n*...외 {len(queue) - i}곡이 더 있습니다.*"
+                break
+            queue_text += next_line
+        else:
+            if len(queue) > max_display:
+                queue_text += f"\n*...외 {len(queue) - max_display}곡이 더 있습니다.*"
+                
+        embed = discord.Embed(
+            title="📋 현재 음악 대기열",
+            description=f"총 **{len(queue)}곡**이 대기 중입니다.\n\n{queue_text}",
+            color=0x3B82F6
+        )
+        embed.set_footer(text="!remove [번호] 로 특정 대기곡을 제거할 수 있습니다. | !shuffle 로 순서를 섞을 수 있습니다.")
+        await message.channel.send(embed=embed)
+
+    elif content.startswith(("!remove ", "!del ")):
+        cmd_len = 8 if content.startswith("!remove ") else 5
+        idx_str = content[cmd_len:].strip()
+        
+        if not idx_str.isdigit():
+            await message.channel.send("⚠️ 삭제할 곡의 올바른 번호를 적어주세요. (예: `!remove 3`)")
+            return
+            
+        idx = int(idx_str)
+        queue = music_queues[guild_id]
+        
+        if idx < 1 or idx > len(queue):
+            await message.channel.send(f"❌ 올바른 범위 내의 번호를 선택해 주세요. (현재 대기열 범위: 1 ~ {len(queue)})")
+            return
+            
+        removed_song = queue.pop(idx - 1)
+        await message.channel.send(f"🗑️ 대기열에서 곡을 삭제했습니다: **{removed_song['title']}**")
+
+    elif content == "!clear":
+        queue = music_queues[guild_id]
+        if not queue:
+            await message.channel.send("⚠️ 비울 대기열이 없습니다.")
+            return
+            
+        count = len(queue)
+        queue.clear()
+        await message.channel.send(f"🧹 대기열의 모든 곡(**{count}곡**)을 삭제했습니다.")
+
+    elif content == "!shuffle":
+        queue = music_queues[guild_id]
+        if len(queue) < 2:
+            await message.channel.send("⚠️ 섞을 대기곡이 부족합니다. (최소 2곡 이상 필요)")
+            return
+            
+        import random
+        random.shuffle(queue)
+        await message.channel.send("🔀 대기열 순서를 무작위로 섞었습니다! `!queue` 로 확인해 보세요.")
+
+    elif content.startswith("!save "):
+        args = content[6:].strip().split(maxsplit=1)
+        if len(args) < 2:
+            await message.channel.send("⚠️ 사용법: `!save [곡 별칭] [유튜브 링크]`\n(예: `!save 기아응원가 https://www.youtube.com/watch?v=...`)")
+            return
+            
+        alias, url = args[0].strip(), args[1].strip()
+        url = url.strip("<>")
+        url = clean_youtube_url(url)
+        
+        await message.channel.send(f"🔍 유튜브 링크 정보를 분석하고 있습니다: **{alias}**...")
+        try:
+            loop = client.loop or asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+            if not info:
+                title = alias
+            else:
+                if 'entries' in info:
+                    info = info['entries'][0]
+                title = info.get("title") or alias
+                
+            playlist_data = load_user_playlist()
+            playlist_data = [item for item in playlist_data if item["alias"] != alias]
+            playlist_data.append({
+                "alias": alias,
+                "title": title,
+                "url": url
+            })
+            
+            if save_user_playlist(playlist_data):
+                await message.channel.send(f"💾 보관함에 노래를 성공적으로 저장했습니다!\n• 별칭: **{alias}**\n• 제목: **{title}**")
+            else:
+                await message.channel.send("❌ 보관함 파일 저장에 실패했습니다.")
+        except Exception as e:
+            await message.channel.send(f"❌ 유튜브 정보를 분석하지 못했습니다. 링크를 확인해 주세요: {e}")
+
+    elif content in ["!playlist", "!pl"]:
+        playlist_data = load_user_playlist()
+        if not playlist_data:
+            await message.channel.send("📭 나만의 보관함이 비어 있습니다. `!save [별칭] [유튜브주소]` 로 노래를 저장해 보세요!")
+            return
+            
+        pl_text = ""
+        for i, item in enumerate(playlist_data):
+            next_line = f"`{i+1}.` **{item['alias']}** — [{item['title']}]({item['url']})\n"
+            if len(pl_text) + len(next_line) > 1800:
+                pl_text += f"\n*...외 {len(playlist_data) - i}곡이 더 있습니다.*"
+                break
+            pl_text += next_line
+            
+        embed = discord.Embed(
+            title="📂 나만의 노래 보관함",
+            description=f"총 **{len(playlist_data)}곡**이 저장되어 있습니다.\n\n{pl_text}",
+            color=0x8B5CF6
+        )
+        embed.set_footer(text="!play_saved [번호/별칭] 으로 재생 목록에 추가하거나, !delete_saved [번호/별칭] 으로 제거합니다.")
+        await message.channel.send(embed=embed)
+
+    elif content.startswith(("!play_saved ", "!pls ")):
+        cmd_len = 12 if content.startswith("!play_saved ") else 5
+        target = content[cmd_len:].strip()
+        
+        playlist_data = load_user_playlist()
+        if not playlist_data:
+            await message.channel.send("📭 보관함이 비어 있습니다.")
+            return
+            
+        selected_item = None
+        if target.isdigit():
+            idx = int(target)
+            if 1 <= idx <= len(playlist_data):
+                selected_item = playlist_data[idx - 1]
+                
+        if not selected_item:
+            for item in playlist_data:
+                if item["alias"] == target:
+                    selected_item = item
+                    break
+                    
+        if not selected_item:
+            await message.channel.send(f"❌ 보관함에서 **'{target}'** 번호 또는 별칭을 찾을 수 없습니다. `!pl` 로 목록을 확인해 보세요.")
+            return
+            
+        voice_client = discord.utils.get(client.voice_clients, guild=message.guild)
+        if not voice_client:
+            if message.author.voice:
+                voice_client = await message.author.voice.channel.connect()
+                await message.channel.send(f"🔊 음성 채널 **'{message.author.voice.channel.name}'**에 자동 연결했습니다.")
+                if guild_id not in music_queues:
+                    music_queues[guild_id] = []
+            else:
+                await message.channel.send("⚠️ 봇이 오디오를 재생할 수 있게 먼저 음성 채널에 들어가 주시거나 `!join` 을 입력해 주세요.")
+                return
+                
+        music_queues[guild_id].append({
+            'title': selected_item['title'],
+            'url': selected_item['url'],
+            'source': None
+        })
+        await message.channel.send(f"📝 보관함에서 대기열 추가: **{selected_item['alias']}** ({selected_item['title']})")
+        
+        if not voice_client.is_playing() and not voice_client.is_paused():
+            play_next_song(guild_id, voice_client, message.channel)
+
+    elif content.startswith(("!delete_saved ", "!dels ")):
+        cmd_len = 14 if content.startswith("!delete_saved ") else 6
+        target = content[cmd_len:].strip()
+        
+        playlist_data = load_user_playlist()
+        if not playlist_data:
+            await message.channel.send("📭 보관함이 비어 있어 삭제할 곡이 없습니다.")
+            return
+            
+        removed_item = None
+        if target.isdigit():
+            idx = int(target)
+            if 1 <= idx <= len(playlist_data):
+                removed_item = playlist_data.pop(idx - 1)
+                
+        if not removed_item:
+            for i, item in enumerate(playlist_data):
+                if item["alias"] == target:
+                    removed_item = playlist_data.pop(i)
+                    break
+                    
+        if not removed_item:
+            await message.channel.send(f"❌ 보관함에서 **'{target}'**에 해당하는 곡을 찾지 못했습니다.")
+            return
+            
+        if save_user_playlist(playlist_data):
+            await message.channel.send(f"🗑️ 보관함에서 곡을 영구 삭제했습니다: **{removed_item['alias']}** ({removed_item['title']})")
+        else:
+            await message.channel.send("❌ 보관함 파일 업데이트 실패.")
+
     # 💡 아이디어 메모장 채널 전용 도움말
     elif content == "!memo":
         embed = discord.Embed(
@@ -695,13 +1244,18 @@ async def on_message(message):
             inline=False
         )
         embed.add_field(
+            name="📊 경기 예측 및 시각화 차트",
+            value="• `!predict [원정] [홈]`: 양 팀간 1,000회 몬테카를로 경기 시뮬레이션 예측\n• `!chart [선수명] [연도]`: 투수(피칭 히트맵) 또는 타자(안타 스프레이 차트) 생성 및 이미지 전송\n• `!today`: 오늘 진행되는 KBO 경기 일정 및 실시간 스코어/결과 조회",
+            inline=False
+        )
+        embed.add_field(
             name="📰 뉴스 수집 및 스케줄링",
-            value="• `!setup`: KBO+10개 구단 채널 + 아이디어 메모장 채널 개설\n• `!scrape`: 실시간 기사 수동 배포 포스팅\n• `⏰ 자동화`: 매일 오전 08:30 / 오후 18:30 전 구단 채널 정기 자동 브리핑 배포",
+            value="• `!setup`: KBO+10개 구단 채널 + 아이디어 메모장 채널 개설\n• `!scrape`: 실시간 기사 수동 배포 포스팅\n• `⏰ 자동화`: 매일 오전 08:30 / 오후 18:30 전 구단 채널 정기 자동 브리핑 배포\n• `⚡ 실시간 알림`: KBO 경기 시작 전(대진표) / 취소(우천 등) / 종료(최종 스코어) 알림 및 갱신 자동화",
             inline=False
         )
         embed.add_field(
             name="🎵 음악 재생 기능",
-            value="• `!join`: 봇을 음성 채널에 호출\n• `!play [유튜브 단일곡/플레이리스트 링크]`: 오디오 고속 큐 스트리밍\n• `!skip` / `!pause` / `!resume` / `!leave`: 음악 재생 제어",
+            value="• `!join` / `!leave`: 봇 음성 채널 호출 및 퇴장\n• `!play [유튜브 주소/검색]`: 단일곡 및 플레이리스트 고속 적재 재생\n• `!queue` (또는 `!q`): 현재 대기열 목록 조회\n• `!remove [번호]`: 특정 대기곡 제거\n• `!clear` / `!shuffle`: 대기열 전체 비우기 및 섞기\n• `!save [별칭] [링크]`: 유튜브 주소를 나만의 보관함에 별칭으로 저장\n• `!pl` (또는 `!playlist`): 내 노래 보관함 목록 확인\n• `!play_saved` (또는 `!pls`) `[번호/별칭]`: 저장된 곡 재생 대기열 추가\n• `!delete_saved` (또는 `!dels`) `[번호/별칭]`: 보관함 곡 삭제\n• `!skip` / `!pause` / `!resume`: 재생 제어",
             inline=False
         )
         await message.channel.send(embed=embed)
